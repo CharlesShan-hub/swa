@@ -5,9 +5,9 @@ Standalone script - no project imports required.
 Tests connection to the Dameng DM8 database.
 
 Usage:
-    uv run python scripts/check_db.py                  # prompts for password
-    uv run python scripts/check_db.py --password pwd   # supply password directly
-    uv run python scripts/check_db.py --help           # show all options
+    uv run python scripts/db/check.py                  # prompts for password
+    uv run python scripts/db/check.py --password pwd   # supply password directly
+    uv run python scripts/db/check.py --help           # show all options
 """
 
 import click

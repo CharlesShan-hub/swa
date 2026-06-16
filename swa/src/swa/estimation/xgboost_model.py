@@ -6,7 +6,8 @@ XGBoost 模型：输入 [A1~A10, T, RH, RPM] 直接预测电压。
 
 import numpy as np
 import xgboost as xgb
-import torch
+
+from scripts.utils.device import get_xgboost_device
 
 NAME = "XGBoost (推荐)"
 
@@ -54,7 +55,7 @@ def train(X: np.ndarray, y: np.ndarray, params: dict = None,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
         "random_state": 42,
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "device": get_xgboost_device(),
     }
     if params:
         default_params.update(params)

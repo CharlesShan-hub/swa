@@ -54,7 +54,8 @@ def load_model(meta_path: str, n_fft_override: int = None):
         os.path.dirname(os.path.abspath(meta_path)), os.path.basename(model_file)
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from scripts.utils.device import get_device
+    device = get_device()
 
     if algo == "lenet_hybrid":
         from src.swa.estimation.lenet_hybrid import HybridNet

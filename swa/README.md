@@ -8,23 +8,22 @@
 
 | # | 脚本 | 用途 | 命令 |
 |---|------|------|------|
-| ① | `scripts/check_db.py` | 测试达梦数据库连通性 | `uv run python scripts/check_db.py` |
-| ② | `scripts/export_data.py` | 从数据库导出原始数据到 JSONL | `uv run python scripts/export_data.py` |
-| ③ | `scripts/analyze_data.py` | 分析原始数据分布、电压分布等 | （待写） |
-| ④ | `scripts/build_dataset.py` | 数据平衡 + 切片，构建最终数据集 | （待写） |
-| ⑤ | `scripts/test_dataloader.py` | 测试 DataLoader 能否正常加载 | （待写） |
-| ⑥ | `scripts/train_model.py` | 训练电压估算模型 | `uv run python scripts/train_model.py --algorithm lenet_hybrid` |
-| ⑦ | `scripts/evaluate_by_voltage.py` | 分电压评估模型 | `uv run python scripts/evaluate_by_voltage.py --model data/model_nfft11` |
+| ① | `scripts/db/check.py` | 测试达梦数据库连通性 | `uv run python scripts/db/check.py` |
+| ② | `scripts/db/downloads.py` | 从数据库导出原始数据到 JSONL | `uv run python scripts/db/downloads.py` |
+| ③ | `scripts/data/analyze_voltage_dist.py` | 分析电压分布 | `uv run python scripts/data/analyze_voltage_dist.py --input data/exported_data.jsonl` |
+| ④ | `scripts/data/balance_data.py` | 数据平衡 + 滑动窗口增强 | `uv run python scripts/data/balance_data.py` |
+| ⑤ | `scripts/train_model.py` | 训练电压估算模型 | `uv run python scripts/train_model.py --algorithm lenet_hybrid` |
+| ⑥ | `scripts/evaluate_by_voltage.py` | 分电压评估模型 | `uv run python scripts/evaluate_by_voltage.py --model data/model_nfft11` |
 
 ### 分析工具
 
 | 脚本 | 用途 | 命令 |
 |------|------|------|
-| `scripts/analyze_errors.py` | 分析预测误差分布 | `uv run python scripts/analyze_errors.py` |
-| `scripts/analyze_features.py` | 特征重要性分析 | `uv run python scripts/analyze_features.py` |
-| `scripts/analyze_voltage_dist.py` | 电压分布可视化 | `uv run python scripts/analyze_voltage_dist.py` |
+| `scripts/data/analyze_voltage_dist.py` | 按区间查看电压分布 | `uv run python scripts/data/analyze_voltage_dist.py --input data/5000.jsonl --interval 20` |
+| `scripts/data/analyze_features.py` | 特征相关性分析（全量） | `uv run python scripts/data/analyze_features.py` |
+| `scripts/data/analyze_pca.py` | PCA 谐波有效维度分析（全量） | `uv run python scripts/data/analyze_pca.py` |
+| `scripts/data/analyze_errors.py` | 预测误差分布分析（全量训练） | `uv run python scripts/data/analyze_errors.py` |
 | `scripts/plot_voltage_dist.py` | 电压分布绘图 | `uv run python scripts/plot_voltage_dist.py` |
-| `scripts/pca_analysis.py` | PCA 降维分析 | `uv run python scripts/pca_analysis.py` |
 | `scripts/check_prediction.py` | 检查单条预测结果 | `uv run python scripts/check_prediction.py` |
 
 ### 核心模块（`src/swa/`）
@@ -34,7 +33,6 @@
 | 配置 | `config/settings.py` | 全局参数配置 |
 | 数据库 | `db/connection.py` | 达梦 DM8 连接管理 |
 | 数据加载 | `signal_process/loader.py` | 读取 JSONL 文件 |
-| 数据平衡 | `data/balance.py` | 数据平衡 + 波形切片增强 |
 | 特征提取 | `estimation/feature_extractor.py` | FFT 特征提取 |
 | 算法 | `estimation/linear_basic.py` | 线性回归（基波 A1 单变量） |
 | 算法 | `estimation/linear_with_env.py` | 线性回归（A1 + 温湿度） |
@@ -259,12 +257,57 @@ uv run python main.py --plot
 在公司执行，分批导出不伤数据库：
 
 ```bash
-uv run python scripts/export_data.py --limit 10000 --batch 200 --sleep 2
+uv run python scripts/db/downloads.py --limit 10000 --batch 200 --sleep 2
 ```
 
 然后回家把 `settings.py` 里的 `mode` 改为 `"local"` 即可。
 
-### 数据库 SQL 测试
+### 数据平衡与增强（`balance_data.py`）
+
+原始数据各电压区间的样本量严重不均（-40V 占 55%，罕见电压仅个位数），直接用会导致模型偏向多数类。
+
+`balance_data.py` 按电压区间分组，用滑动窗口增强补齐少数区间，同时截断多数区间：
+
+```bash
+# 交互式（全部默认值）：输入 data/exported_data.jsonl，输出 data/5000.jsonl
+uv run python scripts/data/balance_data.py
+
+# 全参数模式
+uv run python scripts/data/balance_data.py \
+  --input data/exported_data.jsonl \
+  --output data/5000.jsonl \
+  --n 5000 --interval 20 --window 256 --stride 10 --seed 42
+```
+
+参数说明：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--n` | 5000 | 每个电压区间的目标样本数 |
+| `--interval` | 20 | 电压区间宽度，如 20 表示 -40~-20、-20~0、0~20... |
+| `--window` | 256 | 滑动窗口大小（原始波形 512 点） |
+| `--stride` | 10 | 最小步长，步长越小窗口越多 |
+
+**工作流程**：
+
+```
+原始 512 点波形 → 按 voltage 分组（interval=20）
+                    │
+                    ├── 样本数 ≥ N  → 随机保留 N 条，每条取前 window 个点
+                    │
+                    └── 样本数 < N  → 滑动窗口增强
+                         │              ├── 最大窗口数 = window / stride
+                         │              ├── 算到 N 需要多少条 → 动态调大步长
+                         │              └── 还到不了 N 就用最小步长拉满
+```
+
+区间分组示例（`--interval 20`）：
+```
+-40~-20:  20944 raw → 5000 (截断)
+  20~40:   7723 raw → 5000 (截断)
+  60~80:   4632 raw → 5000 (步长≈12，每个记录~21个窗口)
+  -120~-100:   6 raw →   150 (步长=10，每个记录25个窗口，拉满)
+```
 
 ```sql
 SELECT * FROM YS_DB.TB_MODBUS_DEV_POINT WHERE ROWNUM <= 3;
@@ -346,8 +389,23 @@ swa/
 ├── main.py                              # 入口：预测电压 + 投/退判别
 ├── pyproject.toml                       # 依赖管理
 ├── scripts/
-│   ├── export_data.py                   # 从达梦导出数据到 JSONL
-│   └── train_model.py                   # 训练电压估算模型
+│   ├── db/
+│   │   ├── check.py                     # 测试达梦数据库连通性
+│   │   └── downloads.py                 # 从达梦导出数据到 JSONL
+│   ├── data/
+│   │   ├── analyze_voltage_dist.py      # 电压分布分析
+│   │   ├── analyze_features.py          # 特征相关性分析
+│   │   ├── analyze_pca.py               # PCA 谐波维度分析
+│   │   ├── analyze_errors.py            # 预测误差分析
+│   │   └── balance_data.py              # 数据平衡 + 滑动窗口增强
+│   ├── utils/
+│   │   └── device.py                    # 设备检测（CUDA/MPS/CPU）
+│   ├── train_model.py                   # 训练电压估算模型
+│   ├── evaluate_by_voltage.py           # 分电压评估模型
+│   ├── plot_voltage_dist.py             # 电压分布绘图
+│   ├── check_prediction.py              # 检查单条预测结果
+│   ├── experiment_harmonics.py          # 谐波数量实验
+│   └── experiment_lenet_fft.py          # LeNet FFT 对比实验
 ├── data/
 │   └── exported_data.jsonl              # 导出的数据文件
 │

@@ -223,6 +223,7 @@ __marimo__/
 
 # Data files (too large, not for version control)
 data/
+!swa/scripts/data/
 *.jsonl
 *.pth
 *.ubj

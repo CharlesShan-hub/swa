@@ -1,12 +1,14 @@
-"""分析预测误差最大的数据"""
+"""Analyze prediction errors: find worst predictions."""
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import numpy as np
 from src.swa.signal_process.loader import load_jsonl
 from src.swa.estimation.feature_extractor import extract_from_record
 from src.swa.estimation import xgboost_model
 
 records = load_jsonl("data/exported_data.jsonl")
+print(f"Loaded {len(records)} records")
+
 X_list, y_list = [], []
 for rec in records:
     v = rec.get("ACTUAL_VOLTAGE")
@@ -19,16 +21,18 @@ for rec in records:
 
 X = np.array(X_list)
 y = np.array(y_list)
+print(f"Extracted features for {len(X)} records")
+
 model = xgboost_model.train(X, y)
 y_pred = xgboost_model.predict(model, X)
 
 errs = np.abs(y_pred - y)
 idx = np.argsort(-errs)[:30]
-print("误差最大的30条:")
-print(f"{'真实电压':>8} {'预测电压':>8} {'误差':>8}")
+print("\nTop 30 worst predictions:")
+print(f"{'True':>8} {'Pred':>8} {'Error':>8}")
 for i in idx:
     print(f"{y[i]:>8.1f} {y_pred[i]:>8.1f} {errs[i]:>8.1f}")
 
-print(f"\n误差分布:")
+print(f"\nError distribution:")
 for p in [50, 80, 90, 95, 99]:
-    print(f"  {p}% 数据误差 < {np.percentile(errs, p):.2f} V")
+    print(f"  {p}% of errors < {np.percentile(errs, p):.2f} V")

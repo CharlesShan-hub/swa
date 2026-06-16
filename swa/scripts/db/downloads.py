@@ -5,9 +5,9 @@ Uses ROWID cursor pagination for efficient batch export.
 Standalone script - no project imports required.
 
 Usage:
-    uv run python scripts/export_data.py                          # full interactive mode
-    uv run python scripts/export_data.py --limit 5000 --password pwd  # partial args
-    uv run python scripts/export_data.py --help                   # show all options
+    uv run python scripts/db/downloads.py                          # full interactive mode
+    uv run python scripts/db/downloads.py --limit 5000 --password pwd  # partial args
+    uv run python scripts/db/downloads.py --help                   # show all options
 """
 
 import json

@@ -12,6 +12,8 @@ import random
 from scipy.fftpack import fft
 from scipy.stats import kurtosis, skew
 
+from scripts.utils.device import get_device
+
 from ..config.settings import config
 
 _SEED = 42
@@ -19,8 +21,7 @@ random.seed(_SEED)
 np.random.seed(_SEED)
 torch.manual_seed(_SEED)
 
-# 设备选择：有 NVIDIA GPU 就用 CUDA，否则 CPU
-_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_DEVICE = get_device()
 
 NAME = "LeNet-Hybrid（Mini-Batch）"
 

@@ -9,6 +9,7 @@ import importlib
 import os
 import numpy as np
 
+from scripts.utils.device import get_device
 from ..config.settings import config
 from .feature_extractor import extract_from_record
 
@@ -43,7 +44,7 @@ def load_model():
     if model_file and model_file.endswith(".pth"):
         # PyTorch 模型
         import torch
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
         module = importlib.import_module(f"src.swa.estimation.{algo}")
         wave_len = meta.get("wave_len", 512)
         if algo == "lenet_hybrid":
