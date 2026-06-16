@@ -20,6 +20,9 @@ random.seed(_SEED)
 np.random.seed(_SEED)
 torch.manual_seed(_SEED)
 
+# 设备选择：有 NVIDIA GPU 就用 CUDA，否则 CPU
+_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 NAME = "LeNet-1D"
 
 
@@ -83,9 +86,9 @@ def train(X_train: np.ndarray, y_train: np.ndarray,
         return (w - w_mean) / w_std, w_mean[:1], w_std[:1]
 
     wave_norm, wm, ws = _norm(X_train)
-    wave_t = torch.tensor(wave_norm, dtype=torch.float32)
-    env_t = torch.tensor(X_train[:, 512:], dtype=torch.float32)
-    labels_t = torch.tensor(y_train, dtype=torch.float32)
+    wave_t = torch.tensor(wave_norm, dtype=torch.float32).to(_DEVICE)
+    env_t = torch.tensor(X_train[:, 512:], dtype=torch.float32).to(_DEVICE)
+    labels_t = torch.tensor(y_train, dtype=torch.float32).to(_DEVICE)
 
     # 验证集 & 测试集
     val_wave_t = val_env_t = val_labels_t = None
@@ -93,16 +96,17 @@ def train(X_train: np.ndarray, y_train: np.ndarray,
     has_val = X_val is not None and y_val is not None
     if has_val:
         vn, _, _ = _norm(X_val)
-        val_wave_t = torch.tensor(vn, dtype=torch.float32)
-        val_env_t = torch.tensor(X_val[:, 512:], dtype=torch.float32)
-        val_labels_t = torch.tensor(y_val, dtype=torch.float32)
+        val_wave_t = torch.tensor(vn, dtype=torch.float32).to(_DEVICE)
+        val_env_t = torch.tensor(X_val[:, 512:], dtype=torch.float32).to(_DEVICE)
+        val_labels_t = torch.tensor(y_val, dtype=torch.float32).to(_DEVICE)
     if X_test is not None and y_test is not None:
         tn, _, _ = _norm(X_test)
-        test_wave_t = torch.tensor(tn, dtype=torch.float32)
-        test_env_t = torch.tensor(X_test[:, 512:], dtype=torch.float32)
-        test_labels_t = torch.tensor(y_test, dtype=torch.float32)
+        test_wave_t = torch.tensor(tn, dtype=torch.float32).to(_DEVICE)
+        test_env_t = torch.tensor(X_test[:, 512:], dtype=torch.float32).to(_DEVICE)
+        test_labels_t = torch.tensor(y_test, dtype=torch.float32).to(_DEVICE)
 
-    model = LeNet1D()
+    model = LeNet1D().to(_DEVICE)
+    print(f"  设备: {_DEVICE}")
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = nn.MSELoss()
 
@@ -207,7 +211,7 @@ def predict(model_dict: dict, X_raw: np.ndarray) -> np.ndarray:
         wm = np.mean(wave_raw, axis=1, keepdims=True)
         ws = np.std(wave_raw, axis=1, keepdims=True) + 1e-8
     wave_norm = (wave_raw - wm) / ws
-    wave = torch.tensor(wave_norm, dtype=torch.float32)
-    env = torch.tensor(X_raw[:, 512:], dtype=torch.float32)
+    wave = torch.tensor(wave_norm, dtype=torch.float32).to(_DEVICE)
+    env = torch.tensor(X_raw[:, 512:], dtype=torch.float32).to(_DEVICE)
     with torch.no_grad():
-        return model(wave, env).numpy()
+        return model(wave, env).cpu().numpy()

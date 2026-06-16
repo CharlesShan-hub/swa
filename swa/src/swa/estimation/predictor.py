@@ -43,9 +43,16 @@ def load_model():
     if model_file and model_file.endswith(".pth"):
         # PyTorch 模型
         import torch
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         module = importlib.import_module(f"src.swa.estimation.{algo}")
-        model = module.HybridNet() if algo == "lenet_hybrid" else module.LeNet1D()
-        model.load_state_dict(torch.load(model_file, weights_only=True))
+        wave_len = meta.get("wave_len", 512)
+        if algo == "lenet_hybrid":
+            n_fft = meta.get("n_fft", 10)
+            model = module.HybridNet(n_fft=n_fft, wave_len=wave_len)
+        else:
+            model = module.LeNet1D()
+        model.load_state_dict(torch.load(model_file, map_location=device, weights_only=True))
+        model.to(device)
         model.eval()
         result = {"model": model}
         # 加载归一化参数

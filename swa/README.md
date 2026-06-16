@@ -2,6 +2,51 @@
 
 非侵入式出口硬压板状态检测 — 基于场磨式直流电场传感器波形分析。
 
+## 脚本速览
+
+### 数据流水线（分步执行）
+
+| # | 脚本 | 用途 | 命令 |
+|---|------|------|------|
+| ① | `scripts/01_check_db.py` | 测试达梦数据库连通性 | `uv run python scripts/01_check_db.py` |
+| ② | `scripts/export_data.py` | 从数据库导出原始数据到 JSONL | `uv run python scripts/export_data.py --limit 38000` |
+| ③ | `scripts/analyze_data.py` | 分析原始数据分布、电压分布等 | （待写） |
+| ④ | `scripts/build_dataset.py` | 数据平衡 + 切片，构建最终数据集 | （待写） |
+| ⑤ | `scripts/test_dataloader.py` | 测试 DataLoader 能否正常加载 | （待写） |
+| ⑥ | `scripts/train_model.py` | 训练电压估算模型 | `uv run python scripts/train_model.py --algorithm lenet_hybrid` |
+| ⑦ | `scripts/evaluate_by_voltage.py` | 分电压评估模型 | `uv run python scripts/evaluate_by_voltage.py --model data/model_nfft11` |
+
+### 分析工具
+
+| 脚本 | 用途 | 命令 |
+|------|------|------|
+| `scripts/analyze_errors.py` | 分析预测误差分布 | `uv run python scripts/analyze_errors.py` |
+| `scripts/analyze_features.py` | 特征重要性分析 | `uv run python scripts/analyze_features.py` |
+| `scripts/analyze_voltage_dist.py` | 电压分布可视化 | `uv run python scripts/analyze_voltage_dist.py` |
+| `scripts/plot_voltage_dist.py` | 电压分布绘图 | `uv run python scripts/plot_voltage_dist.py` |
+| `scripts/pca_analysis.py` | PCA 降维分析 | `uv run python scripts/pca_analysis.py` |
+| `scripts/check_prediction.py` | 检查单条预测结果 | `uv run python scripts/check_prediction.py` |
+
+### 核心模块（`src/swa/`）
+
+| 模块 | 文件 | 用途 |
+|------|------|------|
+| 配置 | `config/settings.py` | 全局参数配置 |
+| 数据库 | `db/connection.py` | 达梦 DM8 连接管理 |
+| 数据加载 | `signal_process/loader.py` | 读取 JSONL 文件 |
+| 数据平衡 | `data/balance.py` | 数据平衡 + 波形切片增强 |
+| 特征提取 | `estimation/feature_extractor.py` | FFT 特征提取 |
+| 算法 | `estimation/linear_basic.py` | 线性回归（基波 A1 单变量） |
+| 算法 | `estimation/linear_with_env.py` | 线性回归（A1 + 温湿度） |
+| 算法 | `estimation/linear_full.py` | 线性回归（A1 + 温湿度 + RPM） |
+| 算法 | `estimation/quadratic_model.py` | 二阶工程模型 |
+| 算法 | `estimation/xgboost_model.py` | XGBoost 回归 |
+| 算法 | `estimation/lightgbm_model.py` | LightGBM 回归 |
+| 算法 | `estimation/lenet.py` | LeNet-1D 卷积（原始波形直出） |
+| 算法 | `estimation/lenet_hybrid.py` | LeNet-Hybrid（三路融合，精度最高） |
+| 模型加载 | `estimation/predictor.py` | 加载模型进行预测 |
+| 主入口 | `main.py` | 预测 + 投/退判别 |
+
 ## 原理
 
 场磨式传感器输出正弦波信号，幅值与电场强度成正比：

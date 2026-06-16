@@ -19,13 +19,20 @@ random.seed(_SEED)
 np.random.seed(_SEED)
 torch.manual_seed(_SEED)
 
+# 设备选择：有 NVIDIA GPU 就用 CUDA，否则 CPU
+_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 NAME = "LeNet-Hybrid（Mini-Batch）"
 
 
 class HybridNet(nn.Module):
-    def __init__(self, n_fft=10, n_env=6, init_method="xavier"):
+    def __init__(self, n_fft=10, n_env=6, wave_len=512, init_method="xavier"):
         super().__init__()
         self.n_fft = n_fft
+        self.n_env = n_env
+        self.wave_len = wave_len
+        # AvgPool1d(4) 两次 → 输入长度 // 16
+        conv_out = wave_len // 16
         self.conv = nn.Sequential(
             nn.Conv1d(1, 8, kernel_size=5, padding=2),
             nn.BatchNorm1d(8),
@@ -37,7 +44,7 @@ class HybridNet(nn.Module):
             nn.AvgPool1d(4),
         )
         self.fc = nn.Sequential(
-            nn.Linear(16 * 32 + n_fft + n_env, 64),
+            nn.Linear(16 * conv_out + n_fft + n_env, 64),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(64, 32),
@@ -79,7 +86,7 @@ def _extract(records: list[dict], n_fft: int = 10):
     wave_list, fft_list, env_list, y_list = [], [], [], []
     for rec in records:
         wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-        vals = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:512]
+        vals = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
 
         def _f(v, d=0.0):
             try: return float(v)
@@ -135,9 +142,9 @@ def _build_tensors(records, norm_params=None, n_fft=10):
         env_norm, em, es = _normalize(env_arr)
         norm_params = {"fft_mean": fm, "fft_std": fs, "env_mean": em, "env_std": es}
 
-    return (torch.tensor(wave_norm, dtype=torch.float32),
-            torch.tensor(fft_norm, dtype=torch.float32),
-            torch.tensor(env_norm, dtype=torch.float32)), y_arr, norm_params
+    return (torch.tensor(wave_norm, dtype=torch.float32).to(_DEVICE),
+            torch.tensor(fft_norm, dtype=torch.float32).to(_DEVICE),
+            torch.tensor(env_norm, dtype=torch.float32).to(_DEVICE)), y_arr, norm_params
 
 
 def _eval(model, wave_t, fft_t, env_t, labels_t, loss_fn):
@@ -177,7 +184,7 @@ def train(train_records, val_records=None, test_records=None, epochs=None, lr=No
 
     # 构建数据
     (wave_t, fft_t, env_t), y_train, norm_params = _build_tensors(train_records, n_fft=n_fft)
-    labels_t = torch.tensor(y_train, dtype=torch.float32)
+    labels_t = torch.tensor(y_train, dtype=torch.float32).to(_DEVICE)
 
     has_val = val_records is not None
     test_wave_t = test_fft_t = test_env_t = test_labels_t = None
@@ -185,16 +192,18 @@ def train(train_records, val_records=None, test_records=None, epochs=None, lr=No
 
     if has_val:
         (val_wave_t, val_fft_t, val_env_t), y_val, _ = _build_tensors(val_records, norm_params, n_fft=n_fft)
-        val_labels_t = torch.tensor(y_val, dtype=torch.float32)
+        val_labels_t = torch.tensor(y_val, dtype=torch.float32).to(_DEVICE)
     if test_records is not None:
         (test_wave_t, test_fft_t, test_env_t), y_test, _ = _build_tensors(test_records, norm_params, n_fft=n_fft)
-        test_labels_t = torch.tensor(y_test, dtype=torch.float32)
+        test_labels_t = torch.tensor(y_test, dtype=torch.float32).to(_DEVICE)
 
     # DataLoader
+    _generator = torch.Generator().manual_seed(_SEED)
     dataset = TensorDataset(wave_t, fft_t, env_t, labels_t)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=_generator)
 
-    model = HybridNet(n_fft=n_fft, n_env=env_t.size(1))
+    model = HybridNet(n_fft=n_fft, n_env=env_t.size(1), wave_len=wave_t.size(1)).to(_DEVICE)
+    print(f"  设备: {_DEVICE}")
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # 从配置选择损失函数
@@ -292,10 +301,17 @@ def predict(model_dict: dict, record_or_X):
     """预测电压"""
     model = model_dict["model"]
 
+    # 从模型推断 n_fft
+    fc_in = model.fc[0].in_features
+    n_env_pred = model.n_env if hasattr(model, 'n_env') else 6
+    wave_len_pred = model.wave_len if hasattr(model, 'wave_len') else 512
+    conv_out = wave_len_pred // 16
+    n_fft_pred = fc_in - 16 * conv_out - n_env_pred
+
     if isinstance(record_or_X, dict):
         rec = record_or_X
         wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-        wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:512]
+        wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:wave_len_pred]
 
         def _f(v, d=0.0):
             try: return float(v)
@@ -307,8 +323,8 @@ def predict(model_dict: dict, record_or_X):
         ac = wave - np.mean(wave)
         n = len(ac)
         fft_mag = np.abs(fft(ac))[:n // 2]
-        harmonics = np.zeros(10)
-        for i in range(10):
+        harmonics = np.zeros(n_fft_pred)
+        for i in range(n_fft_pred):
             idx = i + 1
             if idx < len(fft_mag):
                 harmonics[i] = 2.0 * fft_mag[idx] / n
@@ -325,13 +341,13 @@ def predict(model_dict: dict, record_or_X):
         aux = np.array([temp, humid, rpm, vpp, kurt, skewness])
         env_norm = ((aux - model_dict["env_mean"]) / model_dict["env_std"]).reshape(1, -1)
 
-        wave_t = torch.tensor(wave_norm, dtype=torch.float32)
-        fft_t = torch.tensor(fft_norm, dtype=torch.float32)
-        env_t = torch.tensor(env_norm, dtype=torch.float32)
+        wave_t = torch.tensor(wave_norm, dtype=torch.float32).to(_DEVICE)
+        fft_t = torch.tensor(fft_norm, dtype=torch.float32).to(_DEVICE)
+        env_t = torch.tensor(env_norm, dtype=torch.float32).to(_DEVICE)
     else:
-        wave_t = torch.tensor(record_or_X[0], dtype=torch.float32)
-        fft_t = torch.tensor(record_or_X[1], dtype=torch.float32)
-        env_t = torch.tensor(record_or_X[2], dtype=torch.float32)
+        wave_t = torch.tensor(record_or_X[0], dtype=torch.float32).to(_DEVICE)
+        fft_t = torch.tensor(record_or_X[1], dtype=torch.float32).to(_DEVICE)
+        env_t = torch.tensor(record_or_X[2], dtype=torch.float32).to(_DEVICE)
 
     with torch.no_grad():
-        return model(wave_t, fft_t, env_t).numpy()
+        return model(wave_t, fft_t, env_t).cpu().numpy()
