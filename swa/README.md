@@ -9,7 +9,7 @@
 | # | 脚本 | 用途 | 命令 |
 |---|------|------|------|
 | ① | `scripts/check_db.py` | 测试达梦数据库连通性 | `uv run python scripts/check_db.py` |
-| ② | `scripts/export_data.py` | 从数据库导出原始数据到 JSONL | `uv run python scripts/export_data.py --limit 38000` |
+| ② | `scripts/export_data.py` | 从数据库导出原始数据到 JSONL | `uv run python scripts/export_data.py` |
 | ③ | `scripts/analyze_data.py` | 分析原始数据分布、电压分布等 | （待写） |
 | ④ | `scripts/build_dataset.py` | 数据平衡 + 切片，构建最终数据集 | （待写） |
 | ⑤ | `scripts/test_dataloader.py` | 测试 DataLoader 能否正常加载 | （待写） |
