@@ -216,3 +216,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ========================
+# Project-specific
+# ========================
+
+# Data files (too large, not for version control)
+data/
+*.jsonl
+*.pth
+*.ubj
+*.txt
+
+# Local database config (contains passwords)
+src/swa/config/local_config.py
+local_config.py
+
+# Model outputs
+model_params.*

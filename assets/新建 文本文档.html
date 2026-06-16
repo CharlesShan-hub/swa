@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>场磨测量100V以内直流电压建模说明</title>
+<style>
+body{
+    font-family:"Microsoft YaHei";
+    line-height:1.8;
+    max-width:1200px;
+    margin:auto;
+    padding:20px;
+}
+h1,h2,h3{
+    color:#1a4f8b;
+}
+table{
+    border-collapse:collapse;
+    width:100%;
+}
+table,th,td{
+    border:1px solid #ccc;
+}
+th,td{
+    padding:8px;
+}
+code{
+    background:#f5f5f5;
+    padding:2px 5px;
+}
+.math{
+    background:#f8f8f8;
+    border-left:4px solid #4CAF50;
+    padding:10px;
+    margin:10px 0;
+}
+</style>
+</head>
+<body>
+
+<h1>场磨(Field Mill)测量100V以内直流电压建模说明</h1>
+
+<h2>1 场磨测量原理</h2>
+
+<p>
+场磨(Field Mill)本质上是将静电场转换成交流信号进行测量。
+</p>
+
+<p>
+当待测电极存在直流电压V时，会在传感器附近形成电场E：
+</p>
+
+<div class="math">
+E = k · V
+</div>
+
+其中：
+
+<ul>
+<li>V：待测直流电压</li>
+<li>E：电场强度</li>
+<li>k：结构系数</li>
+</ul>
+
+<p>
+旋转叶片周期性遮挡电场：
+</p>
+
+<div class="math">
+E(t)=E·g(ωt)
+</div>
+
+其中：
+
+<ul>
+<li>ω=2πn</li>
+<li>n为转速</li>
+<li>g(ωt)为周期遮挡函数</li>
+</ul>
+
+<p>
+于是感应电荷：
+</p>
+
+<div class="math">
+Q(t)=ε·A·E(t)
+</div>
+
+感应电流：
+
+<div class="math">
+I(t)=dQ/dt
+</div>
+
+最终采集得到交流波形。
+</p>
+
+<hr>
+
+<h2>2 电压与波形关系</h2>
+
+<p>
+理论上：
+</p>
+
+<div class="math">
+V ∝ A1
+</div>
+
+其中：
+
+<ul>
+<li>A1：波形基波幅值</li>
+</ul>
+
+例如：
+
+<div class="math">
+V = K × A1
+</div>
+
+K由标定获得。
+
+<h2>3 温度影响</h2>
+
+<p>
+温度影响以下部分：
+</p>
+
+<ul>
+<li>前端放大器增益漂移</li>
+<li>电容变化</li>
+<li>机械尺寸变化</li>
+<li>运放零漂</li>
+</ul>
+
+通常：
+
+<div class="math">
+Gain(T)=G0(1+αT)
+</div>
+
+因此：
+
+<div class="math">
+A1(T)=A1(25℃)(1+αT)
+</div>
+
+典型：
+
+<table>
+<tr>
+<th>器件</th>
+<th>漂移</th>
+</tr>
+<tr>
+<td>普通运放</td>
+<td>50~100ppm/℃</td>
+</tr>
+<tr>
+<td>精密运放</td>
+<td>1~10ppm/℃</td>
+</tr>
+</table>
+
+<h2>4 湿度影响</h2>
+
+<p>
+湿度主要影响：
+</p>
+
+<ul>
+<li>绝缘电阻</li>
+<li>表面漏电</li>
+<li>空气介电常数</li>
+</ul>
+
+经验模型：
+
+<div class="math">
+A1=A10(1+βRH)
+</div>
+
+其中：
+
+<ul>
+<li>RH：湿度</li>
+<li>β：湿度系数</li>
+</ul>
+
+实际中高湿度时常出现非线性。
+
+<h2>5 转速影响</h2>
+
+<p>
+场磨输出电流：
+</p>
+
+<div class="math">
+I(t)=ωQ
+</div>
+
+因此：
+
+<div class="math">
+A1∝V·ω
+</div>
+
+即：
+
+<div class="math">
+A1∝V·RPM
+</div>
+
+转速波动会直接引起幅值变化。
+
+因此工业系统一般需要：
+
+<div class="math">
+A1' = A1/RPM
+</div>
+
+进行归一化。
+
+<hr>
+
+<h2>6 512点波形包含的信息</h2>
+
+假设每圈采集512点：
+
+<div class="math">
+x=[x1,x2,...,x512]
+</div>
+
+波形中包含：
+
+<table>
+<tr>
+<th>特征</th>
+<th>意义</th>
+</tr>
+<tr>
+<td>峰峰值</td>
+<td>电场强度</td>
+</tr>
+<tr>
+<td>RMS</td>
+<td>整体能量</td>
+</tr>
+<tr>
+<td>基波幅值</td>
+<td>电压主信息</td>
+</tr>
+<tr>
+<td>二次谐波</td>
+<td>机械偏心</td>
+</tr>
+<tr>
+<td>三次谐波</td>
+<td>叶片误差</td>
+</tr>
+<tr>
+<td>相位</td>
+<td>安装偏差</td>
+</tr>
+</table>
+
+<hr>
+
+<h2>7 从512点波形计算特征</h2>
+
+<h3>FFT特征</h3>
+
+<div class="math">
+X(k)=FFT(x)
+</div>
+
+提取：
+
+<ul>
+<li>A1=|X(1)|</li>
+<li>A2=|X(2)|</li>
+<li>A3=|X(3)|</li>
+<li>...</li>
+<li>A10=|X(10)|</li>
+</ul>
+
+特征向量：
+
+<div class="math">
+F=[A1,A2,...,A10]
+</div>
+
+<hr>
+
+<h2>8 电压计算公式（工业推荐）</h2>
+
+最简单模型：
+
+<div class="math">
+V=b0+b1A1
+</div>
+
+加入温湿度：
+
+<div class="math">
+V=b0+b1A1+b2T+b3RH
+</div>
+
+加入转速：
+
+<div class="math">
+V=b0+b1A1+b2T+b3RH+b4RPM
+</div>
+
+<hr>
+
+<h2>9 二阶工程模型</h2>
+
+实际推荐：
+
+<div class="math">
+V=
+b0
++b1A1
++b2A2
++b3A3
++b4T
++b5RH
++b6RPM
++b7A1²
++b8T²
++b9RH²
++b10A1·T
++b11A1·RH
++b12A1·RPM
+</div>
+
+这是工业上最常见的标定公式。
+
+<h2>10 使用训练数据拟合</h2>
+
+训练数据：
+
+<table>
+<tr>
+<th>真实电压</th>
+<th>温度</th>
+<th>湿度</th>
+<th>RPM</th>
+<th>512点波形</th>
+</tr>
+<tr>
+<td>V</td>
+<td>T</td>
+<td>RH</td>
+<td>RPM</td>
+<td>x1~x512</td>
+</tr>
+</table>
+
+步骤：
+
+<h3>步骤1</h3>
+
+FFT：
+
+<div class="math">
+512点 → A1~A10
+</div>
+
+<h3>步骤2</h3>
+
+构造特征：
+
+<div class="math">
+[A1...A10,T,RH,RPM]
+</div>
+
+<h3>步骤3</h3>
+
+最小二乘拟合：
+
+<div class="math">
+V=Xβ
+</div>
+
+求：
+
+<div class="math">
+β=(XᵀX)^(-1)XᵀY
+</div>
+
+得到全部系数。
+
+<hr>
+
+<h2>11 推荐工业级公式</h2>
+
+对于100V以内测量：
+
+<div class="math">
+V=
+b0
++b1A1
++b2A2
++b3A3
++b4T
++b5RH
++b6RPM
++b7A1²
++b8A1·T
++b9A1·RH
++b10A1·RPM
+</div>
+
+通常可达到：
+
+<ul>
+<li>误差＜1%</li>
+<li>重复性＜0.5%</li>
+<li>线性度＜0.5%</li>
+</ul>
+
+<hr>
+
+<h2>12 深度学习方案</h2>
+
+如果训练样本超过10000组：
+
+输入：
+
+<div class="math">
+512波形 + T + RH + RPM
+</div>
+
+直接建立：
+
+<div class="math">
+V=f(x1,x2,...,x512,T,RH,RPM)
+</div>
+
+可采用：
+
+<ul>
+<li>MLP神经网络</li>
+<li>1D-CNN</li>
+<li>XGBoost</li>
+<li>LightGBM</li>
+</ul>
+
+其中XGBoost通常最适合场磨电压标定。
+
+<h2>13 工业项目最终推荐</h2>
+
+推荐流程：
+
+<pre>
+512点波形
+    ↓
+FFT
+    ↓
+提取A1~A10
+    ↓
+加入温度
+    ↓
+加入湿度
+    ↓
+加入RPM
+    ↓
+XGBoost训练
+    ↓
+输出电压
+</pre>
+
+<p>
+对于100V以内场磨测量，
+该方案通常比单纯使用FFT基波计算精度提高3~10倍。
+</p>
+
+</body>
+</html>
