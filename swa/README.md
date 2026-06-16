@@ -8,7 +8,7 @@
 
 | # | 脚本 | 用途 | 命令 |
 |---|------|------|------|
-| ① | `scripts/01_check_db.py` | 测试达梦数据库连通性 | `uv run python scripts/01_check_db.py` |
+| ① | `scripts/check_db.py` | 测试达梦数据库连通性 | `uv run python scripts/check_db.py` |
 | ② | `scripts/export_data.py` | 从数据库导出原始数据到 JSONL | `uv run python scripts/export_data.py --limit 38000` |
 | ③ | `scripts/analyze_data.py` | 分析原始数据分布、电压分布等 | （待写） |
 | ④ | `scripts/build_dataset.py` | 数据平衡 + 切片，构建最终数据集 | （待写） |
