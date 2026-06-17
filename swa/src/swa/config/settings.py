@@ -119,14 +119,16 @@ class DetectionConfig:
 class EstimationConfig:
     """电压估算模型配置"""
     # 算法名称，取消注释即启用
-    # algorithm: str = "linear_basic"
-    # algorithm: str = "linear_with_env"
-    # algorithm: str = "linear_full"
-    # algorithm: str = "quadratic_model"
-    algorithm: str = "lightgbm_model"
+    algorithm: str = "linear_model"
+    # algorithm: str = "random_forest_model"
+    # algorithm: str = "extra_trees_model"
+    # algorithm: str = "svr_model"
     # algorithm: str = "xgboost_model"
+    # algorithm: str = "lightgbm_model"
+    # algorithm: str = "catboost_model"
     # algorithm: str = "lenet"
     # algorithm: str = "lenet_hybrid"
+    # algorithm: str = "lenet_bipath"
 
     # 训练/测试划分（三者之和应 ≤ 总数据量）
     train_size: int = 30400   # 用于训练的条数（8份）

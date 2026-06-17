@@ -90,7 +90,7 @@ def main(input_path, output_path, N, interval_w, window, min_stride, seed):
     max_slides = window // min_stride
 
     # Load data
-    from src.swa.signal_process.loader import load_jsonl
+    from scripts.utils.loader import load_jsonl
     records = load_jsonl(input_path)
     click.echo(f"Loaded {len(records)} records from {input_path}\n")
 

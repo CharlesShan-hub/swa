@@ -1,11 +1,17 @@
 """
-分电压评估脚本
+分电压评估脚本 - 全面评估版
 
-加载训练好的模型，逐条预测，按真实电压分桶统计 MAE / RMSE / 最大误差。
+加载训练好的模型，逐条预测，按真实电压分桶统计：
+- 基础指标：MAE / RMSE
+- 百分位误差：95% / 99% / 最大值
+- 符号准确率
+- 投/退判断准确率
 
 用法：
-    uv run python scripts/evaluate_by_voltage.py --model data/model_nfft11 --data data/exported_data.jsonl
-    uv run python scripts/evaluate_by_voltage.py --model data/model_nfft7  --data data/exported_data.jsonl
+    uv run python scripts/evaluate_by_voltage.py --model data/model_params_linear_model.json --data data/exported_data.jsonl
+    uv run python scripts/evaluate_by_voltage.py --model data/model_params_random_forest_model.joblib --data data/exported_data.jsonl
+    uv run python scripts/evaluate_by_voltage.py --model data/model_params_catboost_model.cbm --data data/exported_data.jsonl
+    uv run python scripts/evaluate_by_voltage.py --model data/model_nfft11.json --data data/exported_data.jsonl
 """
 
 import argparse
@@ -22,7 +28,8 @@ from scipy.fftpack import fft
 from scipy.stats import kurtosis, skew
 
 from src.swa.config.settings import config
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl, split_jsonl, get_dataset_model_path
+from src.swa.estimation.feature_extractor import extract_from_record
 
 
 def parse_voltage(v) -> float:
@@ -37,63 +44,212 @@ def parse_voltage(v) -> float:
         return float("nan")
 
 
-def load_model(meta_path: str, n_fft_override: int = None):
-    """从 .json 元文件加载 PyTorch 模型"""
-    with open(meta_path) as f:
-        meta = json.load(f)
+def load_model(model_path: str):
+    """
+    加载各种类型的模型
+    
+    支持的模型：
+    - linear_model: .json
+    - RandomForest/ExtraTrees/SVR: .joblib
+    - XGBoost: .ubj
+    - LightGBM: .txt
+    - CatBoost: .cbm
+    - 深度学习 (LeNet/LeNetHybrid): .json + .pth
+    """
+    ext = os.path.splitext(model_path)[1].lower()
+    
+    # 从文件名中推断算法名
+    filename = os.path.basename(model_path)
+    algorithm_name = None
+    for algo in ["linear_model", "random_forest_model", "extra_trees_model", "svr_model", "xgboost_model", "lightgbm_model", "catboost_model"]:
+        if algo in filename:
+            algorithm_name = algo
+            break
+    
+    if ext == ".json":
+        # 可能是线性模型或深度学习模型的元文件
+        with open(model_path) as f:
+            meta = json.load(f)
+        
+        if "coef" in meta or "params" in meta:
+            # 线性模型：参数是 [intercept, coef1, coef2, ..., coef16]
+            coef_key = "coef" if "coef" in meta else "params"
+            params = np.array(meta[coef_key])
+            return {
+                "type": "linear",
+                "meta": meta,
+                "coef": params[1:],
+                "intercept": params[0],
+                "algorithm": "linear_model"
+            }
+        elif "algorithm" in meta and meta.get("model_path", "").endswith(".pth"):
+            # 深度学习模型
+            return _load_dl_model(model_path, meta)
+        else:
+            raise ValueError("不认识的 JSON 模型格式")
+    
+    elif ext == ".joblib":
+        # sklearn 模型 (RandomForest, ExtraTrees, SVR)
+        import joblib
+        loaded = joblib.load(model_path)
+        model = loaded
+        # 抑制 sklearn 的 verbose 输出
+        if isinstance(loaded, dict) and "model" in loaded and hasattr(loaded["model"], "verbose"):
+            loaded["model"].verbose = 0
+        return {
+            "type": "sklearn",
+            "model": model,
+            "algorithm": algorithm_name
+        }
+    
+    elif ext == ".ubj":
+        # XGBoost
+        import xgboost as xgb
+        model = xgb.XGBRegressor()
+        model.load_model(model_path)
+        return {
+            "type": "xgboost",
+            "model": {"model": model},
+            "algorithm": "xgboost_model"
+        }
+    
+    elif ext == ".txt":
+        # LightGBM
+        import lightgbm as lgb
+        model = lgb.Booster(model_file=model_path)
+        return {
+            "type": "lightgbm",
+            "model": {"model": model},
+            "algorithm": "lightgbm_model"
+        }
+    
+    elif ext == ".cbm":
+        # CatBoost
+        from catboost import CatBoostRegressor
+        model = CatBoostRegressor()
+        model.load_model(model_path)
+        return {
+            "type": "catboost",
+            "model": {"model": model},
+            "algorithm": "catboost_model"
+        }
+    
+    else:
+        raise ValueError(f"不支持的模型格式: {ext}")
 
+
+def _load_dl_model(meta_path: str, meta: dict):
+    """加载深度学习模型 (LeNet/LeNetHybrid/LeNetBiPath)"""
+    from scripts.utils.device import get_device
+    device = get_device()
+    
     algo = meta.get("algorithm")
     model_file = meta.get("model_path")
-    n_fft = n_fft_override if n_fft_override is not None else meta.get("n_fft", 10)
-
+    n_fft = meta.get("n_fft", 10)
+    
     if not model_file or not model_file.endswith(".pth"):
-        raise ValueError(f"仅支持 PyTorch 模型 (.pth)，当前: {model_file}")
-
-    # 补齐路径：绝对路径直接用，相对路径基于 json 所在目录
+        raise ValueError(f"深度学习模型需要 .pth 文件，当前: {model_file}")
+    
+    # 补齐路径
     model_path = model_file if os.path.isabs(model_file) else os.path.join(
         os.path.dirname(os.path.abspath(meta_path)), os.path.basename(model_file)
     )
-
-    from scripts.utils.device import get_device
-    device = get_device()
-
+    
     if algo == "lenet_hybrid":
         from src.swa.estimation.lenet_hybrid import HybridNet
         model = HybridNet(n_fft=n_fft, n_env=6)
+    elif algo == "lenet_bipath":
+        from src.swa.estimation.lenet_bipath import BiPathNet
+        model = BiPathNet(n_fft=n_fft, n_env=6)
     elif algo == "lenet":
         from src.swa.estimation.lenet import LeNet1D
         model = LeNet1D()
     else:
-        raise ValueError(f"不支持的算法: {algo}")
-
+        raise ValueError(f"不支持的深度学习算法: {algo}")
+    
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.to(device)
     model.eval()
-
+    
     # 归一化参数
     norm_params = {}
     for k in ["wave_mean", "wave_std", "fft_mean", "fft_std", "env_mean", "env_std"]:
         if k in meta:
             norm_params[k] = np.array(meta[k], dtype=np.float32)
+    
+    return {
+        "type": "dl",
+        "model": model,
+        "norm_params": norm_params,
+        "algo": algo,
+        "n_fft": n_fft,
+        "device": device
+    }
 
-    return model, norm_params, algo, n_fft, device
+
+def predict(model_info, record):
+    """统一预测接口"""
+    model_type = model_info["type"]
+    
+    if model_type == "dl":
+        return _predict_dl(model_info, record)
+    
+    # 对于传统 ML 模型，使用对应的算法模块的 predict 函数
+    if "algorithm" in model_info and model_info["algorithm"] is not None:
+        import importlib
+        try:
+            module = importlib.import_module(f"scripts.traditional.{model_info['algorithm']}")
+            features = extract_from_record(record).reshape(1, -1)
+            return float(module.predict(model_info["model"], features)[0])
+        except Exception as e:
+            print(f"Warning: 无法使用算法模块预测，使用备用方案: {e}")
+    
+    # 备用方案（如果无法使用算法模块）
+    if model_type == "linear":
+        features = extract_from_record(record)
+        return float(np.dot(features, model_info["coef"]) + model_info["intercept"])
+    
+    elif model_type in ["sklearn", "xgboost", "catboost"]:
+        features = extract_from_record(record).reshape(1, -1)
+        model = model_info["model"]
+        if isinstance(model, dict) and "model" in model:
+            return float(model["model"].predict(features)[0])
+        else:
+            return float(model.predict(features)[0])
+    
+    elif model_type == "lightgbm":
+        features = extract_from_record(record).reshape(1, -1)
+        model = model_info["model"]
+        if isinstance(model, dict) and "model" in model:
+            return float(model["model"].predict(features)[0])
+        else:
+            return float(model.predict(features)[0])
+    
+    else:
+        raise ValueError(f"不支持的模型类型: {model_type}")
 
 
-def predict_lenet_hybrid(model, record, norm_params, n_fft, device):
-    """对一条记录用 lenet_hybrid 推理"""
+def _predict_dl(model_info, record):
+    """深度学习预测"""
+    model = model_info["model"]
+    norm_params = model_info["norm_params"]
+    algo = model_info["algo"]
+    n_fft = model_info["n_fft"]
+    device = model_info["device"]
+    
     wave_str = record.get("RTU_REGS_P00_WAVE_DATA", "")
     wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:512]
-
+    
     def _f(v, d=0.0):
         try:
             return float(v)
         except (TypeError, ValueError):
             return d
-
+    
     temp = _f(record.get("RTU_REGS_P00_ENV_TEMP"))
     humid = _f(record.get("RTU_REGS_P00_ENV_HUMIDITY"))
     rpm = _f(record.get("RTU_REGS_P00_ROTOR_RPM"))
-
+    
     # FFT 谐波
     ac = wave - np.mean(wave)
     n = len(ac)
@@ -103,174 +259,295 @@ def predict_lenet_hybrid(model, record, norm_params, n_fft, device):
         idx = i + 1
         if idx < len(fft_mag):
             harmonics[i] = 2.0 * fft_mag[idx] / n
+    
+    # 时域特征（从 record 读取，或计算）
+    vpp = record.get("vpp")
+    kurt = record.get("kurtosis")
+    skewness = record.get("skewness")
+    if vpp is None or kurt is None or skewness is None:
+        ac = wave - np.mean(wave)
+        vpp = float(np.max(ac) - np.min(ac))
+        kurt = float(kurtosis(ac, fisher=False))
+        skewness = float(skew(ac))
+    
+    if algo in ["lenet_hybrid", "lenet_bipath"]:
+        # 波形归一化（逐条）
+        wm = np.mean(wave)
+        ws = np.std(wave) + 1e-8
+        wave_norm = ((wave - wm) / ws).reshape(1, -1)
+        
+        # FFT 和环境归一化（用训练集的参数）
+        fft_norm = ((harmonics - norm_params["fft_mean"]) / norm_params["fft_std"]).reshape(1, -1)
+        aux = np.array([temp, humid, rpm, vpp, kurt, skewness])
+        env_norm = ((aux - norm_params["env_mean"]) / norm_params["env_std"]).reshape(1, -1)
+        
+        wave_t = torch.tensor(wave_norm, dtype=torch.float32).to(device)
+        fft_t = torch.tensor(fft_norm, dtype=torch.float32).to(device)
+        env_t = torch.tensor(env_norm, dtype=torch.float32).to(device)
+        
+        with torch.no_grad():
+            if algo == "lenet_hybrid":
+                pred = model(wave_t, fft_t, env_t).cpu().numpy()[0]
+            else:
+                pred = model(wave_t, fft_t, env_t).cpu().numpy()[0]
+        return float(pred)
+    
+    elif algo == "lenet":
+        env = np.array([temp, humid, rpm])
+        ws = wave.copy()
+        wm = np.mean(ws)
+        wstd = np.std(ws) + 1e-8
+        wave_norm = ((ws - wm) / wstd).reshape(1, -1)
+        env_norm = env.reshape(1, -1)
+        full = np.concatenate([wave_norm, env_norm], axis=1)
+        x = torch.tensor(full, dtype=torch.float32).to(device)
+        
+        with torch.no_grad():
+            wave_t = x[:, :512]
+            env_t = x[:, 512:]
+            pred = model(wave_t, env_t).cpu().numpy()[0]
+        return float(pred)
+    
+    else:
+        raise ValueError(f"不支持的深度学习算法: {algo}")
 
-    # 波形归一化（逐条）
-    wm = np.mean(wave)
-    ws = np.std(wave) + 1e-8
-    wave_norm = ((wave - wm) / ws).reshape(1, -1)
 
-    # FFT 和环境归一化（用训练集的参数）
-    fft_norm = ((harmonics - norm_params["fft_mean"]) / norm_params["fft_std"]).reshape(1, -1)
-
-    # 时域特征
-    ac = wave - np.mean(wave)
-    vpp = float(np.max(ac) - np.min(ac))
-    kurt = float(kurtosis(ac, fisher=False))
-    skewness = float(skew(ac))
-    aux = np.array([temp, humid, rpm, vpp, kurt, skewness])
-    env_norm = ((aux - norm_params["env_mean"]) / norm_params["env_std"]).reshape(1, -1)
-
-    wave_t = torch.tensor(wave_norm, dtype=torch.float32).to(device)
-    fft_t = torch.tensor(fft_norm, dtype=torch.float32).to(device)
-    env_t = torch.tensor(env_norm, dtype=torch.float32).to(device)
-
-    with torch.no_grad():
-        pred = model(wave_t, fft_t, env_t).cpu().numpy()[0]
-    return float(pred)
-
-
-def predict_lenet(model, record, device):
-    """对一条记录用 lenet-1D 推理"""
-    wave_str = record.get("RTU_REGS_P00_WAVE_DATA", "")
-    wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:512]
-
-    def _f(v, d=0.0):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return d
-
-    env = np.array([
-        _f(record.get("RTU_REGS_P00_ENV_TEMP")),
-        _f(record.get("RTU_REGS_P00_ENV_HUMIDITY")),
-        _f(record.get("RTU_REGS_P00_ROTOR_RPM")),
-    ])
-
-    # 波形归一化
-    ws = wave.copy()
-    wm = np.mean(ws)
-    wstd = np.std(ws) + 1e-8
-    wave_norm = ((ws - wm) / wstd).reshape(1, -1)
-    env_norm = env.reshape(1, -1)
-    full = np.concatenate([wave_norm, env_norm], axis=1)
-    x = torch.tensor(full, dtype=torch.float32).to(device)
-
-    with torch.no_grad():
-        wave_t = x[:, :512]
-        env_t = x[:, 512:]
-        pred = model(wave_t, env_t).cpu().numpy()[0]
-    return float(pred)
+def calculate_metrics(y_true, y_pred, threshold_abs=30.0):
+    """
+    计算全面的评估指标
+    
+    Returns:
+        dict: 包含所有指标的字典
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    errors = y_pred - y_true
+    abs_errors = np.abs(errors)
+    
+    # 计算相对误差（对于0V用绝对误差）
+    rel_err_mask = y_true != 0
+    rel_errors = np.zeros_like(y_true)
+    rel_errors[rel_err_mask] = abs_errors[rel_err_mask] / np.abs(y_true[rel_err_mask])
+    # 对于0V，假设"在范围内"的标准是绝对值<1V（因为没有参考值）
+    # 或者对于所有样本，同时支持绝对误差和相对误差两个标准，
+    # 取更宽松的那个（即满足任一就算对）
+    abs_error_5 = abs_errors < 5.0  # 绝对误差5V
+    abs_error_10 = abs_errors < 10.0  # 绝对误差10V
+    abs_error_15 = abs_errors < 15.0  # 绝对误差15V
+    
+    rel_error_5 = np.zeros_like(y_true, dtype=bool)
+    rel_error_10 = np.zeros_like(y_true, dtype=bool)
+    rel_error_15 = np.zeros_like(y_true, dtype=bool)
+    
+    rel_error_5[rel_err_mask] = rel_errors[rel_err_mask] < 0.05
+    rel_error_10[rel_err_mask] = rel_errors[rel_err_mask] < 0.10
+    rel_error_15[rel_err_mask] = rel_errors[rel_err_mask] < 0.15
+    
+    # 对于非0V，用相对误差；对于0V，用绝对误差
+    acc_5 = np.mean(
+        (rel_err_mask & rel_error_5) | (~rel_err_mask & abs_error_5)
+    )
+    acc_10 = np.mean(
+        (rel_err_mask & rel_error_10) | (~rel_err_mask & abs_error_10)
+    )
+    acc_15 = np.mean(
+        (rel_err_mask & rel_error_15) | (~rel_err_mask & abs_error_15)
+    )
+    
+    # 基础指标
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    
+    # 百分位误差
+    p95 = float(np.percentile(abs_errors, 95))
+    p99 = float(np.percentile(abs_errors, 99))
+    max_err = float(np.max(abs_errors))
+    
+    # 符号准确率
+    sign_true = np.sign(y_true)
+    sign_pred = np.sign(y_pred)
+    sign_acc = float(np.mean(sign_true == sign_pred))
+    
+    # 投/退判断准确率（保留，但可能不是重点）
+    status_true = np.abs(y_true) > threshold_abs
+    status_pred = np.abs(y_pred) > threshold_abs
+    status_acc = float(np.mean(status_true == status_pred))
+    
+    # 投/退的混淆矩阵
+    tp = float(np.sum((status_true & status_pred)))
+    tn = float(np.sum((~status_true & ~status_pred)))
+    fp = float(np.sum((~status_true & status_pred)))
+    fn = float(np.sum((status_true & ~status_pred)))
+    
+    # 精确率和召回率（针对"投"状态）
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    
+    return {
+        "n": len(y_true),
+        "mae": mae,
+        "rmse": rmse,
+        "p95": p95,
+        "p99": p99,
+        "max_err": max_err,
+        "sign_acc": sign_acc,
+        "status_acc": status_acc,
+        "precision": precision,
+        "recall": recall,
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+        "acc_5": float(acc_5),  # ±5% 误差内准确率
+        "acc_10": float(acc_10), # ±10% 误差内准确率
+        "acc_15": float(acc_15)  # ±15% 误差内准确率
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="分电压评估模型")
-    parser.add_argument("--model", required=True,
-                        help="模型元文件路径 (不含扩展名，如 data/model_nfft11)")
+    parser = argparse.ArgumentParser(description="分电压评估模型 - 全面版")
+    parser.add_argument("--model", 
+                        help="模型文件路径 (支持 .json/.joblib/.ubj/.txt/.cbm)")
+    parser.add_argument("--algorithm", 
+                        choices=["linear_model", "random_forest_model", "extra_trees_model", "svr_model",
+                                 "xgboost_model", "lightgbm_model", "catboost_model",
+                                 "lenet", "lenet_hybrid", "lenet_bipath"],
+                        help="算法名称，配合 --data 自动推断模型路径")
     parser.add_argument("--data", default=config.data_source.local_path,
                         help="数据文件路径")
     parser.add_argument("--limit", type=int, default=0,
                         help="限制评估条数 (默认: 全部)")
-    parser.add_argument("--n-fft", type=int, default=None,
-                        help="覆盖 n_fft (旧模型未保存此参数时使用)")
+    parser.add_argument("--threshold", type=float, default=30.0,
+                        help="投/退判断阈值 (默认: 30V)")
     args = parser.parse_args()
 
+    # 确定模型路径
+    if args.model is None and args.algorithm is None:
+        raise ValueError("必须指定 --model 或 --algorithm 中的一个")
+    
+    if args.model is None:
+        # 自动推断模型路径
+        model_base = get_dataset_model_path(args.data, "data/model_params")
+        algorithm = args.algorithm
+        
+        # 根据算法名称确定扩展名
+        if algorithm in ["linear_model"]:
+            ext = ".json"
+        elif algorithm in ["random_forest_model", "extra_trees_model", "svr_model"]:
+            ext = ".joblib"
+        elif algorithm in ["xgboost_model"]:
+            ext = ".ubj"
+        elif algorithm in ["lightgbm_model"]:
+            ext = ".txt"
+        elif algorithm in ["catboost_model"]:
+            ext = ".cbm"
+        elif algorithm in ["lenet", "lenet_hybrid", "lenet_bipath"]:
+            ext = ".json"
+        
+        args.model = f"{model_base}_{algorithm}{ext}"
+    
     # 加载模型
-    meta_path = args.model
-    if not meta_path.endswith(".json"):
-        meta_path = meta_path + ".json"
-    print(f"加载模型: {meta_path}")
-    model, norm_params, algo, n_fft, device = load_model(meta_path, n_fft_override=args.n_fft)
-    print(f"  算法: {algo}, n_fft: {n_fft}, 设备: {device}")
+    print(f"加载模型: {args.model}")
+    model_info = load_model(args.model)
+    print(f"  类型: {model_info['type']}")
 
     # 加载数据
     print(f"加载数据: {args.data}")
     records = load_jsonl(args.data)
 
-    # 使用与训练完全相同的切分逻辑（先打乱再切分）
-    import random
-    random.seed(42)
-    random.shuffle(records)
-
-    cfg_est = config.estimation
-    total_needed = cfg_est.train_size + cfg_est.val_size + cfg_est.test_size
-    if len(records) < total_needed:
-        ratio = len(records) / total_needed
-        train_n = int(cfg_est.train_size * ratio)
-        val_n = int(cfg_est.val_size * ratio)
-        test_n = len(records) - train_n - val_n
-    else:
-        train_n = cfg_est.train_size
-        val_n = cfg_est.val_size
-        test_n = cfg_est.test_size
-    test_records = records[train_n + val_n:train_n + val_n + test_n]
+    # 使用与训练完全相同的切分逻辑（跟 train_model.py 一致！）
+    train_records, val_records, test_records = split_jsonl(
+        records,
+        full_dataset=True,
+        limit=0,
+        train_ratio=0.9,
+        val_ratio=0.0,
+        test_ratio=0.1,
+        seed=42
+    )
+    # 注意：只取测试集进行评估，完全不会用到训练/验证数据！
     if args.limit:
         test_records = test_records[:args.limit]
-    print(f"评估集: {len(test_records)} 条\n")
+    print(f"评估集 (纯测试集): {len(test_records)} 条\n")
 
     # 逐条预测
-    results = {}  # {voltage: {"y_true": [...], "y_pred": [...]}}
+    results_by_voltage = {}  # {voltage: {"y_true": [...], "y_pred": [...]}}
+    all_y_true = []
+    all_y_pred = []
     skipped = 0
+    
     for i, rec in enumerate(test_records):
         voltage = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
         if np.isnan(voltage):
             skipped += 1
             continue
-
-        if algo == "lenet_hybrid":
-            pred = predict_lenet_hybrid(model, rec, norm_params, n_fft, device)
-        elif algo == "lenet":
-            pred = predict_lenet(model, rec, device)
-        else:
-            raise ValueError(f"不支持的算法: {algo}")
-
+        
+        pred = predict(model_info, rec)
+        
         # 按 10V 分桶
         bucket = round(voltage / 10) * 10
-        if bucket not in results:
-            results[bucket] = {"y_true": [], "y_pred": []}
-        results[bucket]["y_true"].append(voltage)
-        results[bucket]["y_pred"].append(pred)
-
+        if bucket not in results_by_voltage:
+            results_by_voltage[bucket] = {"y_true": [], "y_pred": []}
+        results_by_voltage[bucket]["y_true"].append(voltage)
+        results_by_voltage[bucket]["y_pred"].append(pred)
+        
+        all_y_true.append(voltage)
+        all_y_pred.append(pred)
+        
         if (i + 1) % 1000 == 0:
             print(f"  已评估 {i + 1}/{len(test_records)} 条...")
 
-    print(f"\n{'='*60}")
-    print(f"{'分电压评估结果':^60}")
-    print(f"{'='*60}")
-    print(f"{'电压':>8} | {'数量':>6} | {'占比':>6} | {'MAE':>8} | {'RMSE':>8} | {'最大误差':>10} | {'平均预测':>8}")
-    print(f"{'-'*8}-+-{'-'*6}-+-{'-'*6}-+-{'-'*8}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}")
-
-    # 按电压排序
-    total_mae_list = []
-    total_count = 0
-    for bucket in sorted(results.keys()):
-        y_true = np.array(results[bucket]["y_true"])
-        y_pred = np.array(results[bucket]["y_pred"])
-        mae = float(np.mean(np.abs(y_pred - y_true)))
-        rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
-        max_err = float(np.max(np.abs(y_pred - y_true)))
+    # 计算整体指标
+    overall_metrics = calculate_metrics(all_y_true, all_y_pred, args.threshold)
+    
+    # 打印整体结果
+    print(f"\n{'='*80}")
+    print(f"{'整体评估结果':^80}")
+    print(f"{'='*80}")
+    print(f"样本数: {overall_metrics['n']}  (跳过 {skipped} 条)")
+    print(f"")
+    print(f"误差指标:")
+    print(f"  MAE:      {overall_metrics['mae']:>7.4f} V")
+    print(f"  RMSE:     {overall_metrics['rmse']:>7.4f} V")
+    print(f"  95%分位:  {overall_metrics['p95']:>7.4f} V")
+    print(f"  99%分位:  {overall_metrics['p99']:>7.4f} V")
+    print(f"  最大误差: {overall_metrics['max_err']:>7.4f} V")
+    print(f"")
+    print(f"电压测量精度:")
+    print(f"  ±5% 误差内准确率:  {overall_metrics['acc_5']*100:>6.2f}%")
+    print(f"  ±10% 误差内准确率: {overall_metrics['acc_10']*100:>6.2f}%")
+    print(f"  ±15% 误差内准确率: {overall_metrics['acc_15']*100:>6.2f}%")
+    print(f"")
+    print(f"符号与状态判断:")
+    print(f"  符号准确率:       {overall_metrics['sign_acc']*100:>6.2f}%")
+    print(f"  投/退判断准确率:   {overall_metrics['status_acc']*100:>6.2f}%")
+    print(f"  投状态精确率:     {overall_metrics['precision']*100:>6.2f}%")
+    print(f"  投状态召回率:     {overall_metrics['recall']*100:>6.2f}%")
+    print(f"")
+    print(f"混淆矩阵:")
+    print(f"  TP (投→投): {overall_metrics['tp']:>5.0f}  FP (退→投): {overall_metrics['fp']:>5.0f}")
+    print(f"  FN (投→退): {overall_metrics['fn']:>5.0f}  TN (退→退): {overall_metrics['tn']:>5.0f}")
+    
+    # 打印分电压结果
+    print(f"\n{'='*160}")
+    print(f"{'分电压评估结果':^160}")
+    print(f"{'='*160}")
+    print(f"{'电压':>8} | {'数量':>6} | {'占比':>6} | {'MAE':>8} | {'RMSE':>8} | {'P95':>8} | {'P99':>8} | {'±5%':>8} | {'±10%':>8} | {'±15%':>8} | {'符号准':>8} | {'状态准':>8} | {'平均预测':>8}")
+    print(f"{'-'*8}-+-{'-'*6}-+-{'-'*6}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}")
+    
+    for bucket in sorted(results_by_voltage.keys()):
+        y_true = results_by_voltage[bucket]["y_true"]
+        y_pred = results_by_voltage[bucket]["y_pred"]
+        metrics = calculate_metrics(y_true, y_pred, args.threshold)
+        pct = metrics["n"] / len(test_records) * 100
         mean_pred = float(np.mean(y_pred))
-        n = len(y_true)
-        pct = n / len(test_records) * 100
-        total_mae_list.append(mae * n)
-        total_count += n
-        print(f"{bucket:>7}V | {n:>6} | {pct:>5.1f}% | {mae:>7.4f} | {rmse:>7.4f} | {max_err:>9.4f} | {mean_pred:>7.2f}")
-
-    # 整体加权 MAE
-    weighted_mae = sum(total_mae_list) / total_count if total_count else 0
-    print(f"{'-'*8}-+-{'-'*6}-+-{'-'*6}-+-{'-'*8}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}")
-    print(f"{'合计':>8} | {total_count:>6} | {'100%':>6} | {weighted_mae:>7.4f} | {'':>8} | {'':>10} | {'':>8}")
-    print(f"{'='*60}")
-
-    # 再算一个整体指标
-    all_true, all_pred = [], []
-    for bucket in results:
-        all_true.extend(results[bucket]["y_true"])
-        all_pred.extend(results[bucket]["y_pred"])
-    all_true = np.array(all_true)
-    all_pred = np.array(all_pred)
-    overall_mae = np.mean(np.abs(all_pred - all_true))
-    overall_rmse = np.sqrt(np.mean((all_pred - all_true) ** 2))
-    print(f"\n整体: MAE={overall_mae:.4f}V  RMSE={overall_rmse:.4f}V  (跳过 {skipped} 条)")
+        
+        print(f"{bucket:>7}V | {metrics['n']:>6} | {pct:>5.1f}% | "
+              f"{metrics['mae']:>7.4f} | {metrics['rmse']:>7.4f} | {metrics['p95']:>7.4f} | {metrics['p99']:>7.4f} | "
+              f"{metrics['acc_5']*100:>7.2f}% | {metrics['acc_10']*100:>7.2f}% | {metrics['acc_15']*100:>7.2f}% | "
+              f"{metrics['sign_acc']*100:>7.2f}% | {metrics['status_acc']*100:>7.2f}% | {mean_pred:>7.2f}")
+    
+    print(f"{'='*160}")
 
 
 if __name__ == "__main__":

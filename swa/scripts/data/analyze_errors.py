@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import numpy as np
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl
 from src.swa.estimation.feature_extractor import extract_from_record
 from src.swa.estimation import xgboost_model
 

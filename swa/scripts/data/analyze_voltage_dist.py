@@ -62,7 +62,7 @@ def main(dest: str, interval: int, sort_by: str):
         click.secho(f"❌ Input file not found: {dest}", fg="red")
         sys.exit(1)
 
-    from src.swa.signal_process.loader import load_jsonl
+    from scripts.utils.loader import load_jsonl
 
     all_rec = load_jsonl(dest)
     click.echo(f"Loaded {len(all_rec)} records from {dest}")

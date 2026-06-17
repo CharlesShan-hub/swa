@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import xgboost as xgb
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl
 from src.swa.estimation.feature_extractor import extract_features
 
 records = load_jsonl("data/exported_data.jsonl")

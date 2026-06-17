@@ -1,8 +1,8 @@
 """
 特征提取器
 
-从 512 点波形 + 环境参数中提取特征向量（13 维）：
-    [A1, A2, ..., A10, T, RH, RPM]
+从 512 点波形 + 环境参数中提取特征向量（16 维）：
+    [A1, A2, ..., A10, T, RH, RPM, Vpp, Kurtosis, Skewness]
 
 其中 A1~A10 是 FFT 前 10 次谐波的幅值。
 """
@@ -16,9 +16,12 @@ def extract_features(
     temperature: float = 0.0,
     humidity: float = 0.0,
     rpm: float = 0.0,
+    vpp: float = 0.0,
+    kurtosis: float = 0.0,
+    skewness: float = 0.0,
     sample_rate: int = 15873,
 ) -> np.ndarray:
-    """从 512 点波形 + 环境参数提取特征向量（13 维）。"""
+    """从 512 点波形 + 环境参数 + 时域统计特征提取特征向量（16 维）。"""
     ac = wave - np.mean(wave)
     n = len(ac)
     fft_result = fft(ac)
@@ -32,7 +35,7 @@ def extract_features(
 
     features = np.concatenate([
         harmonics,
-        [temperature, humidity, rpm],
+        [temperature, humidity, rpm, vpp, kurtosis, skewness],
     ])
     return features
 
@@ -51,5 +54,8 @@ def extract_from_record(record: dict) -> np.ndarray:
     temp = _to_float(record.get("RTU_REGS_P00_ENV_TEMP", 0))
     humid = _to_float(record.get("RTU_REGS_P00_ENV_HUMIDITY", 0))
     rpm = _to_float(record.get("RTU_REGS_P00_ROTOR_RPM", 0))
+    vpp = _to_float(record.get("vpp", 0))
+    kurt = _to_float(record.get("kurtosis", 0))
+    skew_val = _to_float(record.get("skewness", 0))
 
-    return extract_features(wave, temp, humid, rpm)
+    return extract_features(wave, temp, humid, rpm, vpp, kurt, skew_val)

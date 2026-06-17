@@ -7,7 +7,7 @@ matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu S
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 from collections import Counter
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl
 
 records = load_jsonl("data/exported_data.jsonl")
 cnt = Counter(r.get("ACTUAL_VOLTAGE", "") for r in records)

@@ -1,14 +1,18 @@
 """
-训练脚本：从本地 JSONL 数据训练电压估算模型。
-
-训练/测试数量在 src/swa/config/settings.py 中配置：
-    estimation.train_size = 25000
-    estimation.test_size  = 5000
+传统机器学习训练脚本：linear / random_forest / extra_trees / svr / xgboost / lightgbm / catboost
 
 用法：
-    uv run python scripts/train_model.py --algorithm linear_basic
-    uv run python scripts/train_model.py --algorithm quadratic_model
+    # 训练单个模型
+    uv run python scripts/train_model.py --algorithm linear_model
+    uv run python scripts/train_model.py --algorithm random_forest_model
+    uv run python scripts/train_model.py --algorithm extra_trees_model
+    uv run python scripts/train_model.py --algorithm svr_model
     uv run python scripts/train_model.py --algorithm xgboost_model
+    uv run python scripts/train_model.py --algorithm lightgbm_model
+    uv run python scripts/train_model.py --algorithm catboost_model
+    
+    # 训练所有模型（数据只加载一次）
+    uv run python scripts/train_model.py --all
 """
 
 import argparse
@@ -21,56 +25,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import torch
-import random
 
-# 固定随机种子，保证可复现
 _SEED = 42
-random.seed(_SEED)
 np.random.seed(_SEED)
 torch.manual_seed(_SEED)
-torch.cuda.manual_seed_all(_SEED)  # 多 GPU 也固定
-# 固定性实验时打开下面两行，性能实验时注释掉以加速
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
+torch.cuda.manual_seed_all(_SEED)
 
 from src.swa.config.settings import config
 from src.swa.estimation.feature_extractor import extract_from_record
-from src.swa.signal_process.loader import load_jsonl
-
-
-def parse_voltage(v) -> float:
-    """解析 ACTUAL_VOLTAGE 字段为数值"""
-    if v is None:
-        return float("nan")
-    s = str(v).strip().lower()
-    s = s.replace("v", "").strip()
-    try:
-        return float(s)
-    except ValueError:
-        return float("nan")
-
-
-def _extract_features(rec: dict, algorithm: str) -> np.ndarray:
-    """根据算法类型提取特征"""
-    if algorithm == "lenet":
-        # LeNet 吃原始波形 (512,) + [T, RH, RPM]
-        wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-        wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:512]
-
-        def _f(v, default=0.0):
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return default
-
-        env = np.array([
-            _f(rec.get("RTU_REGS_P00_ENV_TEMP", 0)),
-            _f(rec.get("RTU_REGS_P00_ENV_HUMIDITY", 0)),
-            _f(rec.get("RTU_REGS_P00_ROTOR_RPM", 0)),
-        ])
-        return np.concatenate([wave, env])  # shape=(515,)
-    else:
-        return extract_from_record(rec)  # shape=(13,)
+from scripts.utils.loader import load_jsonl, split_jsonl, get_dataset_model_path
 
 
 def _print_metrics(y_true, y_pred):
@@ -83,20 +46,6 @@ def _print_metrics(y_true, y_pred):
     print(f"  最大误差: {max_err:.4f} V")
 
 
-def _save_pytorch_model(model, algorithm, base, n_fft=None):
-    model_path = f"{base}.pth"
-    torch.save(model["model"].state_dict(), model_path)
-    save_data = {"algorithm": algorithm, "model_path": model_path}
-    if n_fft is not None:
-        save_data["n_fft"] = n_fft
-    for k in ["wave_mean", "wave_std", "fft_mean", "fft_std", "env_mean", "env_std"]:
-        if k in model:
-            save_data[k] = model[k].tolist()
-    with open(f"{base}.json", "w") as f:
-        json.dump(save_data, f)
-    print(f"\n模型已保存: {model_path}")
-
-
 def _save_xgboost(model, base):
     model_path = f"{base}.ubj"
     model["model"].save_model(model_path)
@@ -105,139 +54,145 @@ def _save_xgboost(model, base):
     print(f"\nXGBoost 模型已保存: {model_path}")
 
 
+def _save_lightgbm(model, base):
+    model_path = f"{base}.txt"
+    model["model"].booster_.save_model(model_path)
+    with open(f"{base}.json", "w") as f:
+        json.dump({"algorithm": "lightgbm_model", "model_path": model_path}, f)
+    print(f"\nLightGBM 模型已保存: {model_path}")
+
+
+def _save_catboost(model, base):
+    model_path = f"{base}.cbm"
+    model["model"].save_model(model_path)
+    with open(f"{base}.json", "w") as f:
+        json.dump({"algorithm": "catboost_model", "model_path": model_path}, f)
+    print(f"\nCatBoost 模型已保存: {model_path}")
+
+
+def _save_sklearn(model, algorithm, base):
+    """保存 sklearn 模型（使用 joblib）"""
+    import joblib
+    model_path = f"{base}.joblib"
+    joblib.dump(model, model_path)
+    with open(f"{base}.json", "w") as f:
+        json.dump({"algorithm": algorithm, "model_path": model_path}, f)
+    print(f"\n模型已保存: {model_path}")
+
+
 def _save_linear(model, algorithm, base):
     with open(f"{base}.json", "w") as f:
         json.dump({"algorithm": algorithm, "params": model}, f, indent=2)
     print(f"\n模型已保存: {base}.json")
 
 
+def train_single_algorithm(algorithm_name, X_train, y_train, X_test, y_test, output_base):
+    """训练单个算法"""
+    module = importlib.import_module(f"scripts.traditional.{algorithm_name}")
+    print(f"\n{'='*60}")
+    print(f"算法: {module.NAME}")
+    print(f"{'='*60}")
+
+    # 训练
+    model = module.train(X_train, y_train)
+
+    # 评估
+    y_pred = module.predict(model, X_test)
+    _print_metrics(y_test, y_pred)
+
+    # 保存：直接在基础路径上加上算法名
+    base = f"{output_base}_{algorithm_name}"
+    if algorithm_name == "xgboost_model":
+        _save_xgboost(model, base)
+    elif algorithm_name == "lightgbm_model":
+        _save_lightgbm(model, base)
+    elif algorithm_name == "catboost_model":
+        _save_catboost(model, base)
+    elif algorithm_name == "linear_model":
+        _save_linear(model, algorithm_name, base)
+    else:
+        _save_sklearn(model, algorithm_name, base)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="训练电压估算模型")
+    parser = argparse.ArgumentParser(description="训练传统 ML 电压估算模型")
     parser.add_argument("--data", default=config.data_source.local_path,
                         help=f"训练数据 JSONL 路径 (默认: {config.data_source.local_path})")
     parser.add_argument("--algorithm",
-                        choices=["linear_basic", "linear_with_env", "linear_full",
-                                 "quadratic_model", "xgboost_model", "lightgbm_model",
-                                 "lenet",
-                                 "lenet_hybrid"],
+                        choices=["linear_model", "random_forest_model", "extra_trees_model", "svr_model", 
+                                 "xgboost_model", "lightgbm_model", "catboost_model", "quadratic_model"],
                         default=config.estimation.algorithm, help="算法 (默认: settings.py 中的配置)")
-    parser.add_argument("--limit", type=int, default=0, help="限制训练条数 (默认: 全部)")
+    parser.add_argument("--all", action="store_true", help="训练所有传统 ML 模型")
+    parser.add_argument("--no-full-dataset", action="store_true", dest="full_dataset", default=True,
+                        help="不使用全量数据，配合 --limit 使用")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="非全量时限制条数 (默认: 全部)")
+    parser.add_argument("--train-ratio", type=float, default=0.9,
+                        help="训练集比例 (默认: 0.9)")
+    parser.add_argument("--val-ratio", type=float, default=0.0,
+                        help="验证集比例 (默认: 0.0，合并到训练集)")
+    parser.add_argument("--test-ratio", type=float, default=0.1,
+                        help="测试集比例 (默认: 0.1)")
     parser.add_argument("--output", default=config.estimation.model_path,
                         help=f"模型参数输出路径 (默认: {config.estimation.model_path})")
-    parser.add_argument("--n_fft", "--n-fft", type=int, default=10,
-                        help="FFT 谐波数量，仅对 lenet_hybrid 有效 (默认: 10)")
-    parser.add_argument("--batch-size", type=int, default=256,
-                        help="训练批次大小，仅对 lenet/lenet_hybrid 有效 (默认: 256)")
-    parser.add_argument("--lr", type=float, default=None,
-                        help="学习率 (默认: lenet=0.01, lenet_hybrid=0.005)")
 
     args = parser.parse_args()
 
-    # 加载算法模块
-    module = importlib.import_module(f"src.swa.estimation.{args.algorithm}")
-    print(f"算法: {module.NAME}")
+    # 所有传统 ML 模型列表
+    all_algorithms = [
+        "linear_model",
+        "random_forest_model", 
+        "extra_trees_model", 
+        "svr_model",
+        "xgboost_model", 
+        "lightgbm_model", 
+        "catboost_model",
+        "quadratic_model"
+    ]
 
-    # 自动缩放学习率：batch 越大，lr 越大（线性缩放规则）
-    base_batch = 256
-    if args.lr is None:
-        if args.algorithm == "lenet_hybrid":
-            args.lr = 0.005 * (args.batch_size / base_batch)
-        elif args.algorithm == "lenet":
-            args.lr = 0.01 * (args.batch_size / base_batch)
-    if args.lr is not None:
-        print(f"  batch_size={args.batch_size}, lr={args.lr:.6f}")
-    else:
-        print(f"  batch_size={args.batch_size}")
-
-    # 加载数据
+    # 加载 & 划分数据（只加载一次）
     print(f"加载数据: {args.data}")
     records = load_jsonl(args.data)
-    if args.limit:
-        records = records[:args.limit]
-    print(f"共 {len(records)} 条")
+    print(f"共 {len(records)} 条，使用{'全量' if args.full_dataset else f'前 {args.limit} 条'}，拆分比例 {args.train_ratio}:{args.val_ratio}:{args.test_ratio}")
 
-    # 打乱数据，防止顺序偏倚
-    random.shuffle(records)
-    print("已打乱顺序")
+    train_records, val_records, test_records = split_jsonl(
+        records,
+        full_dataset=args.full_dataset,
+        limit=args.limit,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=_SEED
+    )
+    # 传统 ML 验证集合并到训练集
+    all_train_records = train_records + val_records
+    print(f"训练集: {len(all_train_records)}, 测试集: {len(test_records)}")
 
-    # 是否深度学习（需要验证集）
-    is_dl = args.algorithm in ("lenet", "lenet_hybrid")
+    # 确定输出路径：如果有对应的数据集目录，就用那个
+    output_base = get_dataset_model_path(args.data, args.output)
+    # 去掉扩展名，确保是基础路径
+    base, ext = os.path.splitext(output_base)
+    os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
+    print(f"模型将保存到: {base}_*.model")
 
-    cfg_est = config.estimation
-    if is_dl:
-        # 8:1:1 切分（训练/验证/测试）
-        total_needed = cfg_est.train_size + cfg_est.val_size + cfg_est.test_size
-        if len(records) < total_needed:
-            ratio = len(records) / total_needed
-            train_n = int(cfg_est.train_size * ratio)
-            val_n = int(cfg_est.val_size * ratio)
-            test_n = len(records) - train_n - val_n
-        else:
-            train_n = cfg_est.train_size
-            val_n = cfg_est.val_size
-            test_n = cfg_est.test_size
-        train_records = records[:train_n]
-        val_records = records[train_n:train_n + val_n]
-        test_records = records[train_n + val_n:train_n + val_n + test_n]
-        print(f"训练集: {train_n}, 验证集: {val_n}, 测试集: {test_n}")
-    else:
-        # 9:1 切分（训练/测试），验证集合并到训练集
-        total_n = cfg_est.train_size + cfg_est.val_size + cfg_est.test_size
-        test_n = cfg_est.test_size
-        train_n = min(len(records) - test_n, total_n - test_n)
-        if train_n < 1:
-            train_n = int(len(records) * 0.9)
-            test_n = len(records) - train_n
-        train_records = records[:train_n]
-        val_records = []
-        test_records = records[train_n:train_n + test_n]
-        print(f"训练集: {train_n}, 测试集: {test_n}")
-
-    # 保存路径（所有分支共用）
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    base, ext = os.path.splitext(args.output)
-
-    if args.algorithm == "lenet_hybrid":
-        model = module.train(train_records, val_records=val_records, test_records=test_records,
-                             n_fft=args.n_fft, batch_size=args.batch_size, lr=args.lr)
-        # 最终测试评估
-        (wave_t, fft_t, env_t), y_test, _ = module._build_tensors(test_records, n_fft=args.n_fft)
-        with torch.no_grad():
-            y_pred = model["model"](wave_t, fft_t, env_t).cpu().numpy()
-        _print_metrics(y_test, y_pred)
-        _save_pytorch_model(model, args.algorithm, base, n_fft=args.n_fft)
-        return
-
-    # 非 hybrid 算法：提取特征
+    # 提取特征（只提取一次）
     X_list, y_list = [], []
-    X_val_list, y_val_list = [], []
     X_test_list, y_test_list = [], []
     skipped = 0
 
-    # 训练集
-    for rec in train_records:
-        voltage = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
-        if np.isnan(voltage):
+    for rec in all_train_records:
+        voltage = rec["ACTUAL_VOLTAGE"]
+        if voltage is None:
             skipped += 1
             continue
-        features = _extract_features(rec, args.algorithm)
-        X_list.append(features)
+        X_list.append(extract_from_record(rec))
         y_list.append(voltage)
 
-    # 验证集（仅神经网络需要）
-    has_val = args.algorithm in ("lenet",)
-    if has_val:
-        for rec in val_records:
-            voltage = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
-            if np.isnan(voltage): continue
-            X_val_list.append(_extract_features(rec, args.algorithm))
-            y_val_list.append(voltage)
-
-    # 测试集
     for rec in test_records:
-        voltage = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
-        if np.isnan(voltage): continue
-        X_test_list.append(_extract_features(rec, args.algorithm))
+        voltage = rec["ACTUAL_VOLTAGE"]
+        if voltage is None:
+            continue
+        X_test_list.append(extract_from_record(rec))
         y_test_list.append(voltage)
 
     X_train = np.array(X_list)
@@ -246,44 +201,26 @@ def main():
     y_test = np.array(y_test_list)
     print(f"训练: {len(y_train)}, 测试: {len(y_test)}, 跳过: {skipped}")
 
-    # 训练
-    if has_val:
-        X_val = np.array(X_val_list)
-        y_val = np.array(y_val_list)
-        X_test_arr = np.array(X_test_list)
-        y_test_arr = np.array(y_test_list)
-        print(f"验证: {len(y_val)}")
-        model = module.train(X_train, y_train, X_val=X_val, y_val=y_val,
-                            X_test=X_test_arr, y_test=y_test_arr, lr=args.lr)
+    if args.all:
+        # 训练所有算法
+        print(f"\n{'#'*60}")
+        print(f"开始训练所有 {len(all_algorithms)} 个模型...")
+        print(f"{'#'*60}")
+        
+        for algorithm in all_algorithms:
+            try:
+                train_single_algorithm(algorithm, X_train, y_train, X_test, y_test, base)
+            except Exception as e:
+                print(f"\n❌ 训练 {algorithm} 时出错: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print(f"\n{'#'*60}")
+        print(f"所有模型训练完成！")
+        print(f"{'#'*60}")
     else:
-        if args.lr is not None:
-            model = module.train(X_train, y_train, lr=args.lr)
-        else:
-            model = module.train(X_train, y_train)
-
-    # 评估
-    y_pred = module.predict(model, X_test)
-    mae = np.mean(np.abs(y_pred - y_test))
-    rmse = np.sqrt(np.mean((y_pred - y_test) ** 2))
-    max_err = np.max(np.abs(y_pred - y_test))
-    print(f"\n评估结果:")
-    print(f"  MAE:  {mae:.4f} V")
-    print(f"  RMSE: {rmse:.4f} V")
-    print(f"  最大误差: {max_err:.4f} V")
-
-    # 保存模型
-    if args.algorithm == "xgboost_model":
-        _save_xgboost(model, base)
-    elif args.algorithm == "lightgbm_model":
-        model_path = f"{base}.txt"
-        model["model"].booster_.save_model(model_path)
-        with open(f"{base}.json", "w") as f:
-            json.dump({"algorithm": "lightgbm_model", "model_path": model_path}, f)
-        print(f"\nLightGBM 模型已保存: {model_path}")
-    elif args.algorithm in ("lenet", "lenet_hybrid"):
-        _save_pytorch_model(model, args.algorithm, base)
-    else:
-        _save_linear(model, args.algorithm, base)
+        # 只训练单个算法
+        train_single_algorithm(args.algorithm, X_train, y_train, X_test, y_test, base)
 
 
 if __name__ == "__main__":

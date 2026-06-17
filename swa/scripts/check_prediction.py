@@ -1,7 +1,7 @@
 """看看 -40V 的预测效果"""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl
 from src.swa.estimation.predictor import predict_from_record
 
 records = load_jsonl("data/exported_data.jsonl")

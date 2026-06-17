@@ -47,7 +47,7 @@ def main():
     mode = config.data_source.mode
 
     if mode == "local":
-        from src.swa.signal_process.loader import load_jsonl
+        from scripts.utils.loader import load_jsonl
         records = load_jsonl(config.data_source.local_path)
         if args.slave_id is not None:
             records = [r for r in records if r.get("RTU_REGS_SLAVE_ID") == args.slave_id]

@@ -2,7 +2,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import numpy as np
 from scipy.stats import kurtosis, skew
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl
 
 records = load_jsonl("data/exported_data.jsonl")
 print(f"Loaded {len(records)} records")

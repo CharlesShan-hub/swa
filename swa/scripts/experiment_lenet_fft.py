@@ -3,7 +3,7 @@ import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
-from src.swa.signal_process.loader import load_jsonl
+from scripts.utils.loader import load_jsonl
 from src.swa.estimation import lenet_hybrid as module
 from src.swa.config.settings import config
 
