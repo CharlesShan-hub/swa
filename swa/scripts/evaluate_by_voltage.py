@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from scipy.fftpack import fft
 from scipy.stats import kurtosis, skew
+from tqdm import tqdm
 
 from src.swa.config.settings import config
 from scripts.utils.loader import load_jsonl, split_jsonl, get_dataset_model_path
@@ -61,7 +62,7 @@ def load_model(model_path: str):
     # 从文件名中推断算法名
     filename = os.path.basename(model_path)
     algorithm_name = None
-    for algo in ["linear_model", "random_forest_model", "extra_trees_model", "svr_model", "xgboost_model", "lightgbm_model", "catboost_model"]:
+    for algo in ["linear_model", "quadratic_model", "random_forest_model", "extra_trees_model", "svr_model", "xgboost_model", "lightgbm_model", "catboost_model"]:
         if algo in filename:
             algorithm_name = algo
             break
@@ -201,8 +202,8 @@ def predict(model_info, record):
             module = importlib.import_module(f"scripts.traditional.{model_info['algorithm']}")
             features = extract_from_record(record).reshape(1, -1)
             return float(module.predict(model_info["model"], features)[0])
-        except Exception as e:
-            print(f"Warning: 无法使用算法模块预测，使用备用方案: {e}")
+        except Exception:
+            pass
     
     # 备用方案（如果无法使用算法模块）
     if model_type == "linear":
@@ -314,13 +315,13 @@ def _predict_dl(model_info, record):
 
 def calculate_metrics(y_true, y_pred, threshold_abs=30.0):
     """
-    计算全面的评估指标
+    计算全面的评估指标（忽略正负号，只比较绝对值）
     
     Returns:
         dict: 包含所有指标的字典
     """
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    y_true = np.abs(np.array(y_true))
+    y_pred = np.abs(np.array(y_pred))
     errors = y_pred - y_true
     abs_errors = np.abs(errors)
     
@@ -409,7 +410,7 @@ def main():
     parser.add_argument("--model", 
                         help="模型文件路径 (支持 .json/.joblib/.ubj/.txt/.cbm)")
     parser.add_argument("--algorithm", 
-                        choices=["linear_model", "random_forest_model", "extra_trees_model", "svr_model",
+                        choices=["linear_model", "quadratic_model", "random_forest_model", "extra_trees_model", "svr_model",
                                  "xgboost_model", "lightgbm_model", "catboost_model",
                                  "lenet", "lenet_hybrid", "lenet_bipath"],
                         help="算法名称，配合 --data 自动推断模型路径")
@@ -433,7 +434,7 @@ def main():
         # 根据算法名称确定扩展名
         if algorithm in ["linear_model"]:
             ext = ".json"
-        elif algorithm in ["random_forest_model", "extra_trees_model", "svr_model"]:
+        elif algorithm in ["random_forest_model", "extra_trees_model", "svr_model", "quadratic_model"]:
             ext = ".joblib"
         elif algorithm in ["xgboost_model"]:
             ext = ".ubj"
@@ -476,7 +477,7 @@ def main():
     all_y_pred = []
     skipped = 0
     
-    for i, rec in enumerate(test_records):
+    for i, rec in enumerate(tqdm(test_records, desc="评估中", unit="条", file=sys.stderr)):
         voltage = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
         if np.isnan(voltage):
             skipped += 1
@@ -493,9 +494,6 @@ def main():
         
         all_y_true.append(voltage)
         all_y_pred.append(pred)
-        
-        if (i + 1) % 1000 == 0:
-            print(f"  已评估 {i + 1}/{len(test_records)} 条...")
 
     # 计算整体指标
     overall_metrics = calculate_metrics(all_y_true, all_y_pred, args.threshold)
@@ -518,22 +516,13 @@ def main():
     print(f"  ±10% 误差内准确率: {overall_metrics['acc_10']*100:>6.2f}%")
     print(f"  ±15% 误差内准确率: {overall_metrics['acc_15']*100:>6.2f}%")
     print(f"")
-    print(f"符号与状态判断:")
-    print(f"  符号准确率:       {overall_metrics['sign_acc']*100:>6.2f}%")
-    print(f"  投/退判断准确率:   {overall_metrics['status_acc']*100:>6.2f}%")
-    print(f"  投状态精确率:     {overall_metrics['precision']*100:>6.2f}%")
-    print(f"  投状态召回率:     {overall_metrics['recall']*100:>6.2f}%")
-    print(f"")
-    print(f"混淆矩阵:")
-    print(f"  TP (投→投): {overall_metrics['tp']:>5.0f}  FP (退→投): {overall_metrics['fp']:>5.0f}")
-    print(f"  FN (投→退): {overall_metrics['fn']:>5.0f}  TN (退→退): {overall_metrics['tn']:>5.0f}")
     
     # 打印分电压结果
     print(f"\n{'='*160}")
     print(f"{'分电压评估结果':^160}")
     print(f"{'='*160}")
-    print(f"{'电压':>8} | {'数量':>6} | {'占比':>6} | {'MAE':>8} | {'RMSE':>8} | {'P95':>8} | {'P99':>8} | {'±5%':>8} | {'±10%':>8} | {'±15%':>8} | {'符号准':>8} | {'状态准':>8} | {'平均预测':>8}")
-    print(f"{'-'*8}-+-{'-'*6}-+-{'-'*6}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}")
+    print(f"{'电压':>8} | {'数量':>6} | {'占比':>6} | {'MAE':>8} | {'RMSE':>8} | {'P95':>8} | {'P99':>8} | {'±5%':>8} | {'±10%':>8} | {'±15%':>8} | {'平均预测':>8}")
+    print(f"{'-'*8}-+-{'-'*6}-+-{'-'*6}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}")
     
     for bucket in sorted(results_by_voltage.keys()):
         y_true = results_by_voltage[bucket]["y_true"]
@@ -545,7 +534,7 @@ def main():
         print(f"{bucket:>7}V | {metrics['n']:>6} | {pct:>5.1f}% | "
               f"{metrics['mae']:>7.4f} | {metrics['rmse']:>7.4f} | {metrics['p95']:>7.4f} | {metrics['p99']:>7.4f} | "
               f"{metrics['acc_5']*100:>7.2f}% | {metrics['acc_10']*100:>7.2f}% | {metrics['acc_15']*100:>7.2f}% | "
-              f"{metrics['sign_acc']*100:>7.2f}% | {metrics['status_acc']*100:>7.2f}% | {mean_pred:>7.2f}")
+              f"{mean_pred:>7.2f}")
     
     print(f"{'='*160}")
 

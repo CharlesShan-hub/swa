@@ -27,7 +27,7 @@ def _get_model_path(algo_name=None):
     # 根据算法类型确定文件扩展名
     if algo_name == "linear_model":
         ext = ".json"
-    elif algo_name in ["random_forest_model", "extra_trees_model", "svr_model"]:
+    elif algo_name in ["random_forest_model", "extra_trees_model", "svr_model", "quadratic_model"]:
         ext = ".joblib"
     elif algo_name == "xgboost_model":
         ext = ".ubj"

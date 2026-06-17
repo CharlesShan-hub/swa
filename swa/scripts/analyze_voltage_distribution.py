@@ -2,35 +2,35 @@
 """
 分析数据集中各个真值电压的分布情况
 """
-import json
+import sys
+import os
+import argparse
 from collections import defaultdict
 import numpy as np
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from scripts.utils.loader import load_jsonl
+
+
 def analyze_data(file_path):
-    # 加载数据
-    records = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    
+    # 使用现成的工具加载数据
+    records = load_jsonl(file_path, extract_features=False)
     print(f"总样本数: {len(records)}")
     
     # 按真值电压分组
     voltage_groups = defaultdict(list)
     for rec in records:
-        # 解析真值电压
-        actual_voltage = rec.get('ACTUAL_VOLTAGE', None)
-        if actual_voltage is None:
+        voltage = rec.get('ACTUAL_VOLTAGE', None)
+        if voltage is None:
             continue
-            
-        # 从波形提取的特征值（或者其他特征）
-        signal = rec.get('SIGNAL', [])
         
-        # 只保留有完整波形的数据
-        if len(signal) == 512:
-            voltage_groups[actual_voltage].append(np.array(signal))
+        # 获取波形数据
+        wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
+        wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
+        
+        # 只保留有完整波形的数据（512点或256点都行）
+        if len(wave) >= 128:
+            voltage_groups[voltage].append(wave)
     
     print("\n各电压档位样本数:")
     for v in sorted(voltage_groups.keys()):
@@ -62,17 +62,20 @@ def analyze_data(file_path):
             'max': max_mean
         })
         
-        print(f"{v:&gt;8}V | {len(signals):&gt;6} | {mean_of_means:&gt;10.2f} | {std_of_means:&gt;10.2f} | {min_mean:&gt;10.2f} | {max_mean:&gt;10.2f}")
+        print("  {:8}V | {:6} | {:10.2f} | {:10.2f} | {:10.2f} | {:10.2f}".format(
+            int(v), len(signals), mean_of_means, std_of_means, min_mean, max_mean
+        ))
     
     return all_voltage_info
 
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="分析数据集中各电压档位的波形分布")
+    parser.add_argument("-d", "--data", default="data/exported_data.jsonl",
+                        help="数据文件路径 (默认: data/exported_data.jsonl)")
+    args = parser.parse_args()
+
     print("=" * 70)
-    print("分析 exported_data.jsonl")
+    print("分析 {}".format(args.data))
     print("=" * 70)
-    info1 = analyze_data("data/exported_data.jsonl")
-    
-    print("\n" + "=" * 70)
-    print("分析 5000.jsonl")
-    print("=" * 70)
-    info2 = analyze_data("data/5000.jsonl")
+    analyze_data(args.data)

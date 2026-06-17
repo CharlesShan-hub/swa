@@ -119,7 +119,7 @@ def main():
     parser.add_argument("--data", default=config.data_source.local_path,
                         help=f"训练数据 JSONL 路径 (默认: {config.data_source.local_path})")
     parser.add_argument("--algorithm",
-                        choices=["linear_model", "random_forest_model", "extra_trees_model", "svr_model", 
+                        choices=["linear_model", "pure_signal_model", "hybrid_model", "random_forest_model", "extra_trees_model", "svr_model", 
                                  "xgboost_model", "lightgbm_model", "catboost_model", "quadratic_model"],
                         default=config.estimation.algorithm, help="算法 (默认: settings.py 中的配置)")
     parser.add_argument("--all", action="store_true", help="训练所有传统 ML 模型")
@@ -141,6 +141,8 @@ def main():
     # 所有传统 ML 模型列表
     all_algorithms = [
         "linear_model",
+        "pure_signal_model",
+        "hybrid_model",
         "random_forest_model", 
         "extra_trees_model", 
         "svr_model",
@@ -196,9 +198,9 @@ def main():
         y_test_list.append(voltage)
 
     X_train = np.array(X_list)
-    y_train = np.array(y_list)
+    y_train = np.abs(np.array(y_list))
     X_test = np.array(X_test_list)
-    y_test = np.array(y_test_list)
+    y_test = np.abs(np.array(y_test_list))
     print(f"训练: {len(y_train)}, 测试: {len(y_test)}, 跳过: {skipped}")
 
     if args.all:

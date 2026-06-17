@@ -89,9 +89,19 @@ def main(input_path, output_path, N, interval_w, window, min_stride, seed):
     random.seed(seed)
     max_slides = window // min_stride
 
+    # 验证波形长度
+    from scripts.utils.loader import load_jsonl as _l
+    _sample = _l(input_path, extract_features=False)[:1]
+    if _sample:
+        _w = _sample[0].get("RTU_REGS_P00_WAVE_DATA", "")
+        _n = len([float(x) for x in _w.split(",")])
+        if window > _n:
+            click.secho(f"⚠️ 窗口大小 ({window}) 大于波形长度 ({_n})，已自动调整为 {_n}", fg="yellow")
+            window = _n
+
     # Load data
     from scripts.utils.loader import load_jsonl
-    records = load_jsonl(input_path)
+    records = load_jsonl(input_path, extract_features=False)
     click.echo(f"Loaded {len(records)} records from {input_path}\n")
 
     # Group by voltage interval
@@ -123,7 +133,7 @@ def main(input_path, output_path, N, interval_w, window, min_stride, seed):
             # Enough raw records, take first N (already shuffled)
             for rec in recs[:N]:
                 wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-                wave = [float(x) for x in wave_str.split(",")][:512]
+                wave = [float(x) for x in wave_str.split(",")]
                 out = build_record(rec, wave[:window])
                 output_records.append(out)
             bucket_stats.append((label, base_count, N, min_stride, 1))
@@ -143,7 +153,7 @@ def main(input_path, output_path, N, interval_w, window, min_stride, seed):
         generated = []
         for rec in recs:
             wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-            wave = [float(x) for x in wave_str.split(",")][:512]
+            wave = [float(x) for x in wave_str.split(",")]
             windows_list = generate_windows(wave, window, actual_stride, actual_max_slides)
             for w in windows_list:
                 out = build_record(rec, w)

@@ -42,7 +42,7 @@ def get_dataset_model_path(data_path: str, default_model_path: str = "data/model
 
 def extract_time_domain_features(wave_str: str) -> dict:
     """
-    从波形字符串提取时域统计特征。
+    从波形字符串提取时域统计特征 + A1 相位。
 
     Args:
         wave_str: 波形数据字符串（逗号分隔的数值）
@@ -52,6 +52,7 @@ def extract_time_domain_features(wave_str: str) -> dict:
         - vpp: 峰峰值
         - kurtosis: 峭度
         - skewness: 偏度
+        - phase: A1 的 FFT 相位角（弧度，-π ~ π）
     """
     try:
         vals = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
@@ -59,29 +60,39 @@ def extract_time_domain_features(wave_str: str) -> dict:
         vpp = float(np.max(ac) - np.min(ac))
         kurt = float(kurtosis(ac, fisher=False))
         skewn = float(skew(ac))
+
+        # A1 相位
+        n = len(ac)
+        fft_result = np.fft.fft(ac)
+        phase = float(np.angle(fft_result[1]))  # A1 的相位，-π ~ π
+
         return {
             "vpp": vpp,
             "kurtosis": kurt,
-            "skewness": skewn
+            "skewness": skewn,
+            "phase": phase
         }
     except:
         print("Error! Fail to extract features!")
         return {
             "vpp": 0.0,
             "kurtosis": 0.0,
-            "skewness": 0.0
+            "skewness": 0.0,
+            "phase": 0.0
         }
 
 
-def load_jsonl(filepath: str) -> list[dict]:
+def load_jsonl(filepath: str, extract_features: bool = True) -> list[dict]:
     """
-    从 JSONL 文件加载所有记录，并自动清洗 ACTUAL_VOLTAGE 字段为 float，同时预提取时域统计特征。
+    从 JSONL 文件加载所有记录，并自动清洗 ACTUAL_VOLTAGE 字段为 float。
 
     Args:
         filepath: JSONL 文件路径
+        extract_features: 是否预提取时域统计特征（Vpp/Kurtosis/Skewness），
+                          数据增强等场景可设为 False 加快速度。
 
     Returns:
-        记录列表（每条记录的 ACTUAL_VOLTAGE 已转为 float，且包含预提取的时域特征）
+        记录列表（每条记录的 ACTUAL_VOLTAGE 已转为 float）
     """
     records = []
     with open(filepath, "r", encoding="utf-8") as f:
@@ -90,26 +101,26 @@ def load_jsonl(filepath: str) -> list[dict]:
             if line:
                 rec = json.loads(line)
                 rec["ACTUAL_VOLTAGE"] = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
-                # 预提取时域统计特征
-                wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-                time_feats = extract_time_domain_features(wave_str)
-                rec.update(time_feats)
+                if extract_features:
+                    wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
+                    time_feats = extract_time_domain_features(wave_str)
+                    rec.update(time_feats)
                 records.append(rec)
     return records
 
 
-def iter_jsonl(filepath: str) -> Iterator[dict]:
-    """逐行迭代 JSONL 文件，自动清洗 ACTUAL_VOLTAGE 并预提取时域特征（省内存）"""
+def iter_jsonl(filepath: str, extract_features: bool = True) -> Iterator[dict]:
+    """逐行迭代 JSONL 文件，自动清洗 ACTUAL_VOLTAGE 字段为 float（省内存）"""
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
                 rec = json.loads(line)
                 rec["ACTUAL_VOLTAGE"] = parse_voltage(rec.get("ACTUAL_VOLTAGE"))
-                # 预提取时域统计特征
-                wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
-                time_feats = extract_time_domain_features(wave_str)
-                rec.update(time_feats)
+                if extract_features:
+                    wave_str = rec.get("RTU_REGS_P00_WAVE_DATA", "")
+                    time_feats = extract_time_domain_features(wave_str)
+                    rec.update(time_feats)
                 yield rec
 
 

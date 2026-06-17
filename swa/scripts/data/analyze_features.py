@@ -1,16 +1,23 @@
 import sys, os
+import argparse
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import numpy as np
 from scipy.stats import kurtosis, skew
 from scripts.utils.loader import load_jsonl
 
-records = load_jsonl("data/exported_data.jsonl")
+parser = argparse.ArgumentParser(description="特征相关性分析")
+parser.add_argument("-d", "--data", default="data/exported_data.jsonl",
+                    help="数据文件路径 (默认: data/exported_data.jsonl)")
+args = parser.parse_args()
+
+records = load_jsonl(args.data)
 print(f"Loaded {len(records)} records")
 
 feats_all = []
 for i, r in enumerate(records):
     wave_str = r.get("RTU_REGS_P00_WAVE_DATA", "")
-    wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)[:512]
+    wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
     ac = wave - np.mean(wave)
     rms = np.sqrt(np.mean(np.square(ac)))
     vpp = np.max(ac) - np.min(ac)

@@ -23,40 +23,26 @@ ALGORITHMS = [
 ]
 
 
-def evaluate_model(name: str, data_path: str, output_dir: str) -> str:
+def evaluate_model(name: str, data_path: str, output_dir: str) -> None:
     """
-    安静地评估单个模型，返回结果字符串
+    运行单个模型的评估，输出实时显示，同时保存到文件。
     """
-    print(f"\n{'='*70}")
-    print(f"Evaluating: {name:>40}")
-    print(f"{'='*70}")
-    
-    # 运行评估脚本，使用 --algorithm 自动推断模型路径
-    result = subprocess.run(
-        ["uv", "run", "python", "scripts/evaluate_by_voltage.py", "--algorithm", name, "--data", data_path],
-        capture_output=True,
-        text=True,
-        cwd=os.path.dirname(__file__) + "/.."
-    )
-    
-    # 保存结果到文件
     output_file = os.path.join(output_dir, f"{name}.txt")
+    
+    # stdout 写入文件，stderr 直接透传到终端（tqdm 进度条实时显示）
     with open(output_file, "w", encoding="utf-8") as f:
-        f.write(result.stdout)
-        if result.stderr:
-            f.write("\n=== STDERR ===\n")
-            f.write(result.stderr)
+        subprocess.run(
+            ["uv", "run", "python", "scripts/evaluate_by_voltage.py", "--algorithm", name, "--data", data_path],
+            stdout=f,
+            cwd=os.path.dirname(__file__) + "/..",
+        )
     
-    # 打印关键信息
-    print(f"Results saved to: {output_file}")
-    
-    # 从输出中提取并打印整体结果
-    for line in result.stdout.split("\n"):
-        if "MAE:" in line or "RMSE:" in line or "95%分位:" in line or "99%分位:" in line or \
-           "符号准确率:" in line or "投/退判断准确率:" in line:
-            print("  " + line.strip())
-    
-    return result.stdout
+    # 读取结果文件，提取关键指标打印到终端
+    with open(output_file, "r", encoding="utf-8") as f:
+        for line in f:
+            if any(k in line for k in ["MAE:", "RMSE:", "95%分位:", "99%分位:",
+                                        "符号准确率:", "投/退判断准确率:", "±5%", "±10%", "±15%"]):
+                print(f"  {line.strip()}")
 
 
 def main():
@@ -80,15 +66,14 @@ def main():
     print("BATCH EVALUATION: TRADITIONAL ML MODELS")
     print(f"Data: {args.data}")
     print(f"Output: {args.output}")
-    print("="*70)
+    print("="*70, flush=True)
     
-    results = {}
     for name in ALGORITHMS:
-        results[name] = evaluate_model(name, args.data, args.output)
+        evaluate_model(name, args.data, args.output)
     
-    print("\n" + "="*70)
-    print("DONE! All results saved to:", args.output)
-    print("="*70)
+    print(f"\n{'='*70}")
+    print(f"DONE! All results saved to: {args.output}")
+    print(f"{'='*70}")
 
 
 if __name__ == "__main__":
