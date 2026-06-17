@@ -36,7 +36,6 @@ torch.cuda.manual_seed_all(_SEED)  # 多 GPU 也固定
 from src.swa.config.settings import config
 from src.swa.estimation.feature_extractor import extract_from_record
 from src.swa.signal_process.loader import load_jsonl
-from src.swa.data.balance import balance_records, slice_all_records
 
 
 def parse_voltage(v) -> float:
@@ -84,14 +83,12 @@ def _print_metrics(y_true, y_pred):
     print(f"  最大误差: {max_err:.4f} V")
 
 
-def _save_pytorch_model(model, algorithm, base, n_fft=None, wave_len=None):
+def _save_pytorch_model(model, algorithm, base, n_fft=None):
     model_path = f"{base}.pth"
     torch.save(model["model"].state_dict(), model_path)
     save_data = {"algorithm": algorithm, "model_path": model_path}
     if n_fft is not None:
         save_data["n_fft"] = n_fft
-    if wave_len is not None:
-        save_data["wave_len"] = wave_len
     for k in ["wave_mean", "wave_std", "fft_mean", "fft_std", "env_mean", "env_std"]:
         if k in model:
             save_data[k] = model[k].tolist()
@@ -133,12 +130,7 @@ def main():
                         help="训练批次大小，仅对 lenet/lenet_hybrid 有效 (默认: 256)")
     parser.add_argument("--lr", type=float, default=None,
                         help="学习率 (默认: lenet=0.01, lenet_hybrid=0.005)")
-    parser.add_argument("--balance", type=int, default=6000,
-                        help="每个电压桶的目标条数 N，启用自适应平衡 (默认: 6000，设0关闭)")
-    parser.add_argument("--wave-len", type=int, default=256,
-                        help="波形窗口长度 (默认: 256，减小后自动用滑动窗口切片)")
-    parser.add_argument("--stride", type=int, default=8,
-                        help="波形切片滑动步长 (默认: 8，仅在 wave-len<512 且未启用 --balance 时使用)")
+
     args = parser.parse_args()
 
     # 加载算法模块
@@ -152,7 +144,10 @@ def main():
             args.lr = 0.005 * (args.batch_size / base_batch)
         elif args.algorithm == "lenet":
             args.lr = 0.01 * (args.batch_size / base_batch)
-    print(f"  batch_size={args.batch_size}, lr={args.lr:.6f}")
+    if args.lr is not None:
+        print(f"  batch_size={args.batch_size}, lr={args.lr:.6f}")
+    else:
+        print(f"  batch_size={args.batch_size}")
 
     # 加载数据
     print(f"加载数据: {args.data}")
@@ -160,13 +155,6 @@ def main():
     if args.limit:
         records = records[:args.limit]
     print(f"共 {len(records)} 条")
-
-    # 自适应数据平衡（智能切片 + 欠采样，内置滑动窗口增强）
-    if args.balance > 0:
-        records = balance_records(records, target=args.balance, wave_len=args.wave_len)
-    elif args.wave_len < 512:
-        # 简单切片增强（不启用平衡时）
-        records = slice_all_records(records, wave_len=args.wave_len, stride=args.stride)
 
     # 打乱数据，防止顺序偏倚
     random.shuffle(records)
@@ -217,7 +205,7 @@ def main():
         with torch.no_grad():
             y_pred = model["model"](wave_t, fft_t, env_t).cpu().numpy()
         _print_metrics(y_test, y_pred)
-        _save_pytorch_model(model, args.algorithm, base, n_fft=args.n_fft, wave_len=args.wave_len)
+        _save_pytorch_model(model, args.algorithm, base, n_fft=args.n_fft)
         return
 
     # 非 hybrid 算法：提取特征
