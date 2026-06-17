@@ -256,7 +256,10 @@ def main():
         model = module.train(X_train, y_train, X_val=X_val, y_val=y_val,
                             X_test=X_test_arr, y_test=y_test_arr, lr=args.lr)
     else:
-        model = module.train(X_train, y_train, lr=args.lr)
+        if args.lr is not None:
+            model = module.train(X_train, y_train, lr=args.lr)
+        else:
+            model = module.train(X_train, y_train)
 
     # 评估
     y_pred = module.predict(model, X_test)
