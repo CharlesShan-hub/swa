@@ -27,7 +27,7 @@ def _print_metrics(y_true, y_pred, label="评估"):
 def main():
     parser = argparse.ArgumentParser(description="训练传统 ML 电压估算模型")
     parser.add_argument("--dataset", default="default", help="数据集名称")
-    parser.add_argument("--model", default="linear", choices=["linear", "xgboost", "quadratic"],
+    parser.add_argument("--model", default="linear", choices=["linear", "xgboost", "quadratic", "cubic", "quadratic_nox", "cubic_nox", "quadratic_zero"],
                         help="模型名称 (linear/xgboost/quadratic)")
     parser.add_argument("--features", nargs="+", default=["a1", "a3", "a5", "vpp", "kurtosis", "temp", "humid", "rpm"],
                         help="使用的特征，如 a1 a3 a5 vpp 等")
@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--repeat", type=str,
                         default="10:50,-10:50,-110:50",
                         help="电压重复倍率，默认所有小样本 50 倍")
+    parser.add_argument("--vol-limit", type=int, default=None,
+                        help="每个电压最多取 N 条（均衡样本）")
     args = parser.parse_args()
 
     # 解析 repeat 参数
@@ -75,7 +77,21 @@ def main():
         print(f"  全部训练: {len(train_recs)} 条")
         print(f"  测试集: 无")
 
-    # 4. 构造特征矩阵
+    # 4. 均衡采样（每个电压最多 N 条）
+    if args.vol_limit:
+        from lib.data import group_by_voltage
+        groups = group_by_voltage(train_recs)
+        balanced = []
+        for v in sorted(groups, key=lambda x: str(x)):
+            group = groups[v]
+            if len(group) > args.vol_limit:
+                group = list(np.random.RandomState(42).choice(group, args.vol_limit, replace=False))
+            balanced.extend(group)
+            print(f"    电压 {v:>4}V: {len(groups[v])} → {len(group)} 条")
+        train_recs = balanced
+        print(f"  均衡后训练集: {len(train_recs)} 条")
+
+    # 5. 构造特征矩阵
     def to_Xy(recs):
         X, y = [], []
         for rec in recs:
@@ -150,8 +166,72 @@ def main():
             json.dump({"algorithm": "quadratic", "features": args.features, "params": model, "n_params": len(model)}, f, indent=2)
         print(f"\n二次模型已保存: {output_path}（{len(model)} 参数）")
 
+    elif args.model == "cubic":
+        from lib.traditional.cubic import train, predict, NAME
+        print(f"\n模型: {NAME}")
+        model = train(X_train, y_train)
+        y_pred = predict(model, X_train)
+        _print_metrics(y_train, y_pred, "训练集")
+        if len(X_test):
+            y_pred = predict(model, X_test)
+            _print_metrics(y_test, y_pred, "测试集")
+
+        output_dir = dataset_dir(args.dataset)
+        output_path = os.path.join(output_dir, f"model_cubic.json")
+        with open(output_path, "w") as f:
+            json.dump({"algorithm": "cubic", "features": args.features, "params": model, "n_params": len(model)}, f, indent=2)
+        print(f"\n三次模型已保存: {output_path}（{len(model)} 参数）")
+
+    elif args.model == "quadratic_nox":
+        from lib.traditional.quadratic_nox import train, predict, NAME
+        print(f"\n模型: {NAME}")
+        model = train(X_train, y_train)
+        y_pred = predict(model, X_train)
+        _print_metrics(y_train, y_pred, "训练集")
+        if len(X_test):
+            y_pred = predict(model, X_test)
+            _print_metrics(y_test, y_pred, "测试集")
+
+        output_dir = dataset_dir(args.dataset)
+        output_path = os.path.join(output_dir, f"model_quadratic_nox.json")
+        with open(output_path, "w") as f:
+            json.dump({"algorithm": "quadratic_nox", "features": args.features, "params": model, "n_params": len(model)}, f, indent=2)
+        print(f"\n二次无交互模型已保存: {output_path}（{len(model)} 参数）")
+
+    elif args.model == "cubic_nox":
+        from lib.traditional.cubic_nox import train, predict, NAME
+        print(f"\n模型: {NAME}")
+        model = train(X_train, y_train)
+        y_pred = predict(model, X_train)
+        _print_metrics(y_train, y_pred, "训练集")
+        if len(X_test):
+            y_pred = predict(model, X_test)
+            _print_metrics(y_test, y_pred, "测试集")
+
+        output_dir = dataset_dir(args.dataset)
+        output_path = os.path.join(output_dir, f"model_cubic_nox.json")
+        with open(output_path, "w") as f:
+            json.dump({"algorithm": "cubic_nox", "features": args.features, "params": model, "n_params": len(model)}, f, indent=2)
+        print(f"\n三次无交互模型已保存: {output_path}（{len(model)} 参数）")
+
+    elif args.model == "quadratic_zero":
+        from lib.traditional.quadratic_zero import train, predict, NAME
+        print(f"\n模型: {NAME}")
+        model = train(X_train, y_train)
+        y_pred = predict(model, X_train)
+        _print_metrics(y_train, y_pred, "训练集")
+        if len(X_test):
+            y_pred = predict(model, X_test)
+            _print_metrics(y_test, y_pred, "测试集")
+
+        output_dir = dataset_dir(args.dataset)
+        output_path = os.path.join(output_dir, f"model_quadratic_zero.json")
+        with open(output_path, "w") as f:
+            json.dump({"algorithm": "quadratic_zero", "features": args.features, "params": model, "n_params": len(model)}, f, indent=2)
+        print(f"\n过零二次模型已保存: {output_path}（{len(model)} 参数）")
+
     else:
-        print(f"未知模型: {args.model}, 可用: linear, xgboost, quadratic")
+        print(f"未知模型: {args.model}, 可用: linear, xgboost, quadratic, cubic, quadratic_nox, cubic_nox, quadratic_zero")
         return
 
 
