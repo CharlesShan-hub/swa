@@ -27,7 +27,7 @@ def _print_metrics(y_true, y_pred, label="评估"):
 def main():
     parser = argparse.ArgumentParser(description="训练传统 ML 电压估算模型")
     parser.add_argument("--dataset", default="default", help="数据集名称")
-    parser.add_argument("--model", default="linear", choices=["linear", "xgboost", "quadratic", "cubic", "quadratic_nox", "cubic_nox", "quadratic_zero"],
+    parser.add_argument("--model", default="linear", choices=["linear", "xgboost", "quadratic", "cubic", "quadratic_nox", "cubic_nox", "quadratic_zero", "hybrid", "hybrid_poly"],
                         help="模型名称 (linear/xgboost/quadratic)")
     parser.add_argument("--features", nargs="+", default=["a1", "a3", "a5", "vpp", "kurtosis", "temp", "humid", "rpm"],
                         help="使用的特征，如 a1 a3 a5 vpp 等")
@@ -44,6 +44,8 @@ def main():
                         help="电压重复倍率，默认所有小样本 50 倍")
     parser.add_argument("--vol-limit", type=int, default=None,
                         help="每个电压最多取 N 条（均衡样本）")
+    parser.add_argument("--degree", type=int, default=1,
+                        help="多项式修正次数（仅 hybrid_poly 使用）")
     args = parser.parse_args()
 
     # 解析 repeat 参数
@@ -55,7 +57,7 @@ def main():
 
     # 1. 加载
     print(f"加载数据集: {args.dataset}")
-    is_metrics = args.dataset.startswith("smooth_") or args.dataset.startswith("metrics_")
+    is_metrics = args.dataset.startswith("smooth_") or args.dataset.startswith("metrics_") or args.dataset.startswith("savgol_")
     records = load(args.dataset, repeat=repeat or None)
     print(f"  共 {len(records)} 条")
 
@@ -133,7 +135,7 @@ def main():
         print(f"\n模型已保存: {output_path}")
 
     elif args.model == "xgboost":
-        from lib.traditional.xgboost import train, predict, NAME
+        from lib.traditional.xgboost_wrapper import train, predict, NAME
         print(f"\n模型: {NAME}")
         model = train(X_train, y_train)
         y_pred = predict(model, X_train)
@@ -230,8 +232,86 @@ def main():
             json.dump({"algorithm": "quadratic_zero", "features": args.features, "params": model, "n_params": len(model)}, f, indent=2)
         print(f"\n过零二次模型已保存: {output_path}（{len(model)} 参数）")
 
+    elif args.model == "hybrid":
+        from lib.traditional.hybrid import train_hybrid, PhysicalModel, ResidualModel, NAME
+        print(f"\n模型: {NAME}")
+
+        result = train_hybrid(
+            records, args.features,
+            train_voltages=args.train_voltages,
+            test_voltages=args.test_voltages or None,
+            vol_limit=args.vol_limit,
+        )
+
+        # 保存
+        output_dir = dataset_dir(args.dataset)
+        phys_path = os.path.join(output_dir, f"model_hybrid_phys.json")
+        res_path = os.path.join(output_dir, f"model_hybrid_res.ubj")
+        meta_path = os.path.join(output_dir, f"model_hybrid.json")
+
+        with open(phys_path, "w") as f:
+            json.dump({"k_global": result["k_global"]}, f)
+        result["res"].model.save_model(res_path)
+        with open(meta_path, "w") as f:
+            json.dump({
+                "algorithm": "hybrid",
+                "features": args.features,
+                "k_global": result["k_global"],
+                "phys_path": phys_path,
+                "res_path": res_path,
+                "train_mae": result["train_mae"],
+                "test_mae": result.get("test_mae"),
+            }, f, indent=2)
+        print(f"\n混合模型已保存: {meta_path}")
+
+    elif args.model == "hybrid_poly":
+        from lib.traditional.hybrid_poly import train, predict, NAME
+        print(f"\n模型: {NAME} (degree={args.degree})")
+
+        # 构造特征矩阵
+        def to_Xy(recs):
+            X, y = [], []
+            for rec in recs:
+                v = rec.get("ACTUAL_VOLTAGE")
+                if not isinstance(v, (int, float)):
+                    continue
+                feat = [rec.get(f"_{k}") for k in args.features]
+                if any(f is None for f in feat):
+                    continue
+                X.append(feat)
+                y.append(abs(float(v)))
+            return np.array(X), np.array(y)
+
+        X_train, y_train = to_Xy(train_recs)
+        X_test, y_test = to_Xy(test_recs)
+        print(f"  X_train: {X_train.shape}, X_test: {X_test.shape}")
+
+        model = train(X_train, y_train, degree=args.degree)
+        y_pred_train = predict(model, X_train)
+        _print_metrics(y_train, y_pred_train, "训练集")
+        if len(X_test):
+            y_pred_test = predict(model, X_test)
+            _print_metrics(y_test, y_pred_test, "测试集")
+
+        phys_train = model["k_global"] * X_train[:, 0]
+        phys_mae = np.mean(np.abs(np.abs(phys_train) - y_train))
+        print(f"  物理基线 MAE: {phys_mae:.2f}V → 修正后: {np.mean(np.abs(y_pred_train - y_train)):.2f}V")
+
+        output_dir = dataset_dir(args.dataset)
+        output_path = os.path.join(output_dir, f"model_hybrid_poly.json")
+        with open(output_path, "w") as f:
+            json.dump({
+                "algorithm": "hybrid_poly",
+                "features": args.features,
+                "k_global": model["k_global"],
+                "coeffs": model["coeffs"],
+                "degree": model["degree"],
+                "n_params": len(model["coeffs"]),
+            }, f, indent=2)
+        print(f"\n混合多项式模型已保存: {output_path}")
+
     else:
-        print(f"未知模型: {args.model}, 可用: linear, xgboost, quadratic, cubic, quadratic_nox, cubic_nox, quadratic_zero")
+        print(f"未知模型: {args.model}, 可用: linear, xgboost, quadratic, cubic, quadratic_nox, cubic_nox, quadratic_zero, hybrid, hybrid_poly")
         return
 
 

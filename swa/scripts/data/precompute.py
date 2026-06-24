@@ -13,7 +13,7 @@ from lib.data import load_raw
 from lib.metrics import extend
 from lib.utils import dataset_dir
 
-METRICS = ["a1", "a3", "a5", "vpp", "kurtosis", "temp", "humid", "rpm"]
+METRICS = ["a1", "a3", "a5", "vpp", "kurtosis", "temp", "humid", "rpm", "dc"]
 
 
 def main():
