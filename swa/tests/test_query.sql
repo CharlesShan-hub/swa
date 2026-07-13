@@ -1,2 +1,0 @@
--- 先看看这张表有什么字段
-SELECT * FROM YS_DB.TB_MODBUS_DEV_POINT WHERE ROWNUM <= 3;

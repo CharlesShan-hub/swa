@@ -1,2 +1,4 @@
-# swa: Sine Wave Analysis
-# 非侵入式出口硬压板状态检测 — 信号处理与状态判别
+"""
+swa — Sine Wave Analysis
+场磨非接触式电压检测算法与工具
+"""

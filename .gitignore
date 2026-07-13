@@ -235,3 +235,5 @@ local_config.py
 
 # Model outputs
 model_params.*
+swa_old
+

@@ -1,16 +1,15 @@
-# Python-generated files
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
+*.py[cod]
 *.egg-info
-
-# Virtual environments
 .venv
-
-# Local configuration (password etc.)
-config/local.yaml
+.pixi
+.pixi_cache
 .env
-*.local.*
-src/swa/config/local_config.py
+data/raw/
+data/cleaned/
+data/models/
+*.jsonl
+*.pth
+*.ubj
+*.joblib
+*.cbm
