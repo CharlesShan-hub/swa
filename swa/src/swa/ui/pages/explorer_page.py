@@ -321,7 +321,12 @@ class ExplorerPage(BasePage):
             r = df.iloc[0]
             title = f"ID={record_id}  电压={r['actual_voltage']}V"
             if pd.notna(r.get('harm_cycles')):
-                title += f"  {r['harm_cycles']:.1f}周期  A1={r['harm_a1']:.0f}  A2={r['harm_a2']:.0f}  误差={r['harm_error']:.1f}"
+                title += (
+                    f"  {r['harm_cycles']:.1f}周期"
+                    f"  A1={r['harm_a1']:.0f}  A2={r['harm_a2']:.0f}"
+                    f"  THD={r['harm_thd']:.2f}"
+                    f"  噪声={r['harm_noise_pct']:.0%}"
+                )
             if pd.notna(r['system_time']):
                 title += f"  {r['system_time']}"
             self.ax.set_title(title)
@@ -348,7 +353,8 @@ class ExplorerPage(BasePage):
     def _get_data(self):
         df = self.dm.query(
             fields=["id", "system_time", "actual_voltage", "temperature", "humidity",
-                    "enabled", "harm_a1", "harm_a2", "harm_error", "harm_cycles"],
+                    "enabled", "harm_a1", "harm_a2", "harm_error",
+                    "harm_cycles", "harm_thd", "harm_noise_pct"],
             where=self._build_where(),
             enabled_only=False, order_by="system_time",
         )
@@ -439,16 +445,20 @@ class ExplorerPage(BasePage):
             self.table.setRowCount(0)
             return
         cols = ["id", "system_time", "actual_voltage", "temperature", "humidity",
-                "harm_cycles", "harm_a1", "harm_a2", "harm_error", "enabled"]
+                "harm_cycles", "harm_a1", "harm_a2", "harm_error",
+                "harm_thd", "harm_noise_pct", "enabled"]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(["ID", "时间", "电压(V)", "温度", "湿度",
-                                             "周期", "A1", "A2", "误差", "启用"])
+                                             "周期", "A1", "A2", "误差",
+                                             "THD", "噪声%", "启用"])
         self.table.setRowCount(len(df))
         for i, (_, row) in enumerate(df.iterrows()):
             for j, col in enumerate(cols):
                 val = row.get(col)
-                if col in ("harm_a1", "harm_a2", "harm_error"):
-                    text = f"{val:.1f}" if pd.notna(val) else ""
+                if col in ("harm_a1", "harm_a2", "harm_error", "harm_thd"):
+                    text = f"{val:.2f}" if pd.notna(val) else ""
+                elif col == "harm_noise_pct":
+                    text = f"{val:.1%}" if pd.notna(val) else ""
                 elif col == "harm_cycles":
                     text = f"{val:.1f}" if pd.notna(val) else ""
                 elif col == "enabled":
