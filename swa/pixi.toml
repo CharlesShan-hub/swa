@@ -3,7 +3,7 @@ name = "swa"
 version = "2.0.0"
 description = "Sine Wave Analysis — 场磨非接触式电压检测"
 channels = ["conda-forge"]
-platforms = ["win-64"]
+platforms = ["win-64","osx-arm64"]
 
 [tasks]
 download = "python scripts/download.py"
@@ -23,7 +23,9 @@ numpy = ">=2.4.6"
 pandas = ">=3.0.3"
 scipy = ">=1.17.1"
 tqdm = ">=4.66.0"
-dmpython = ">=2.5.32"
 scikit-learn = ">=1.7.0"
 PySide6 = ">=6.8.0"
 pyecharts = ">=2.0.0"
+
+[target.win-64.pypi-dependencies]
+dmpython = ">=2.5.32"

@@ -196,14 +196,30 @@ class ExplorerPage(BasePage):
             self.summary_label.setText(
                 f"总 {s['total']}  |  启用 {s['enabled']}  |  禁用 {s['disabled']}"
             )
-            # 动态更新电压下拉
+            # 动态更新电压下拉（按连续段分组）
             self.volt_filter.blockSignals(True)
             self.volt_filter.clear()
             self.volt_filter.addItem("全部")
             cur = self.dm._conn.cursor()
-            cur.execute("SELECT DISTINCT actual_voltage FROM records ORDER BY actual_voltage")
-            for row in cur.fetchall():
-                self.volt_filter.addItem(f"{row[0]}V", row[0])
+            cur.execute("SELECT id, actual_voltage FROM records ORDER BY id")
+            rows = cur.fetchall()
+            segments = []  # [(v, id_start, id_end), ...]
+            for rid, v in rows:
+                if segments and segments[-1][0] == v:
+                    segments[-1] = (v, segments[-1][1], rid)
+                else:
+                    segments.append((v, rid, rid))
+            # 合并或显示
+            from collections import Counter
+            seg_counter = Counter()
+            for v, _, _ in segments:
+                seg_counter[v] += 1
+            seg_index = Counter()
+            for v, id_start, id_end in segments:
+                seg_index[v] += 1
+                label = f"{v}V ({seg_index[v]}/{seg_counter[v]})"
+                where = f"actual_voltage = {v} AND id BETWEEN {id_start} AND {id_end}"
+                self.volt_filter.addItem(label, where)
             self.volt_filter.blockSignals(False)
             self.volt_filter.setCurrentIndex(0)
             self._refresh_table()
@@ -218,9 +234,9 @@ class ExplorerPage(BasePage):
 
     def _build_where(self) -> str:
         conds = []
-        volt_value = self.volt_filter.currentData()
-        if volt_value is not None:
-            conds.append(f"actual_voltage = {volt_value}")
+        where = self.volt_filter.currentData()
+        if where is not None:
+            conds.append(f"({where})")
         s = self.status_filter.currentText()
         if s == "启用":
             conds.append("enabled = 1")
@@ -228,30 +244,30 @@ class ExplorerPage(BasePage):
             conds.append("enabled = 0")
         return " AND ".join(conds) if conds else "1=1"
 
-    def _get_selected_voltage(self) -> float:
-        v = self.volt_filter.currentData()
-        if v is None:
+    def _get_selected_where(self) -> str:
+        where = self.volt_filter.currentData()
+        if where is None:
             raise ValueError("未选择具体电压")
-        return float(v)
+        return where
 
     def _disable_voltage_group(self):
         try:
-            v = self._get_selected_voltage()
+            where = self._get_selected_where()
         except ValueError:
             self.status_label.setText("请先选择具体电压")
             return
-        self.dm.disable_records(f"actual_voltage = {v}")
-        self.status_label.setText(f"已禁用全部 {v}V 数据")
+        self.dm.disable_records(where)
+        self.status_label.setText(f"已禁用该段数据")
         self._refresh_summary_and_table()
 
     def _enable_voltage_group(self):
         try:
-            v = self._get_selected_voltage()
+            where = self._get_selected_where()
         except ValueError:
             self.status_label.setText("请先选择具体电压")
             return
-        self.dm.enable_records(f"actual_voltage = {v}")
-        self.status_label.setText(f"已启用全部 {v}V 数据")
+        self.dm.enable_records(where)
+        self.status_label.setText(f"已启用该段数据")
         self._refresh_summary_and_table()
 
     def _refresh_summary_and_table(self):
