@@ -222,8 +222,7 @@ __marimo__/
 # ========================
 
 # Data files (too large, not for version control)
-data/
-!swa/scripts/data/
+swa/data/
 *.jsonl
 *.pth
 *.ubj
@@ -237,3 +236,4 @@ local_config.py
 model_params.*
 swa_old
 
+swa/src/data/projects/

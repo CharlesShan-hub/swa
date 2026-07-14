@@ -98,9 +98,9 @@ class DownloadPage(BasePage):
         conn_form.setSpacing(6)
 
         ip_row = QHBoxLayout()
-        self.ip_edit = QLineEdit("10.15.10.1")
+        self.ip_edit = QLineEdit("10.15.52.21")
         self.ip_edit.setFixedWidth(150)
-        self.port_edit = QLineEdit("5256")
+        self.port_edit = QLineEdit("502")
         self.port_edit.setFixedWidth(70)
         ip_row.addWidget(self.ip_edit)
         ip_row.addWidget(QLabel(":"))

@@ -10,6 +10,7 @@ download = "python scripts/download.py"
 train = "python scripts/train.py"
 evaluate = "python scripts/evaluate.py"
 gui = "python -m swa.ui.app"
+upload-network = "python scripts/db/upload_network.py"
 
 [dependencies]
 python = ">=3.12"

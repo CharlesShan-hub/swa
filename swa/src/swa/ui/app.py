@@ -21,9 +21,10 @@ from PySide6.QtCore import Qt
 from swa.ui.pages.download_page import DownloadPage
 from swa.ui.pages.project_page import ProjectPage
 from swa.ui.pages.explorer_page import ExplorerPage
+from swa.ui.pages.detection_page import DetectionPage
 
 
-PAGES = ["数据下载", "项目管理", "数据探索"]
+PAGES = ["数据下载", "项目管理", "数据探索", "电压检测"]
 
 APP_STYLE = """
 QWidget {
@@ -176,6 +177,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(DownloadPage())
         self.pages.addWidget(ProjectPage())
         self.pages.addWidget(ExplorerPage())
+        self.pages.addWidget(DetectionPage())
 
         layout.addWidget(self.nav)
         layout.addWidget(self.pages, 1)

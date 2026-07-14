@@ -1,0 +1,51 @@
+-- ============================================================
+-- 重建 YS_DB_HD 下三张 YSH_OID 表（匹配 snmp.db 的新表结构）
+-- ============================================================
+
+DROP TABLE IF EXISTS YS_DB_HD.YSH_OID_CONN;
+DROP TABLE IF EXISTS YS_DB_HD.YSH_OID_PORT;
+DROP TABLE IF EXISTS YS_DB_HD.YSH_OID_DEVICE;
+
+-- ─── 1. YSH_OID_DEVICE — 设备清单 ──────────────────────────
+CREATE TABLE YS_DB_HD.YSH_OID_DEVICE (
+    DEVICE_ID   INTEGER NOT NULL PRIMARY KEY,
+    DEVICE_NAME VARCHAR(200),
+    DEVICE_IP   VARCHAR(50),
+    DEVICE_TYPE VARCHAR(20)   -- 'switch' / 'terminal'
+);
+
+-- ─── 2. YSH_OID_PORT — 端口清单 ─────────────────────────────
+CREATE TABLE YS_DB_HD.YSH_OID_PORT (
+    PORT_ID         INTEGER NOT NULL PRIMARY KEY,
+    DEVICE_ID       INTEGER,
+    PORT_NAME       VARCHAR(100),
+    PORT_INDEX      INTEGER,
+    PORT_MAC        VARCHAR(20),
+    PORT_SPEED      VARCHAR(20),
+    PORT_STATUS     VARCHAR(10),   -- '1'=UP / '2'=DOWN
+    PORT_ADMIN      VARCHAR(10),
+    PORT_TYPE       VARCHAR(10),
+    PORT_MTU        VARCHAR(10),
+    PORT_DESCR      VARCHAR(200),
+    IS_AGGREGATION  INTEGER DEFAULT 0,
+    MAC_COUNT       INTEGER DEFAULT 0
+);
+
+-- ─── 3. YSH_OID_CONN — 完整连接（给人看的）─────────────────
+CREATE TABLE YS_DB_HD.YSH_OID_CONN (
+    CONN_ID            INTEGER NOT NULL PRIMARY KEY,
+    SOURCE_DEVICE_ID   INTEGER,
+    SOURCE_DEVICE_NAME VARCHAR(200),
+    SOURCE_DEVICE_TYPE VARCHAR(20),
+    SOURCE_DEVICE_IP   VARCHAR(50),
+    SOURCE_PORT_ID     INTEGER,
+    SOURCE_PORT_NAME   VARCHAR(100),
+    SOURCE_PORT_MAC    VARCHAR(20),
+    DEST_DEVICE_ID     INTEGER,
+    DEST_DEVICE_NAME   VARCHAR(200),
+    DEST_DEVICE_TYPE   VARCHAR(20),
+    DEST_DEVICE_IP     VARCHAR(50),
+    DEST_PORT_ID       INTEGER,
+    DEST_PORT_NAME     VARCHAR(100),
+    DEST_PORT_MAC      VARCHAR(20)
+);
