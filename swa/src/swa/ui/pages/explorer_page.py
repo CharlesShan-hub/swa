@@ -144,6 +144,7 @@ class ExplorerPage(BasePage):
         self.table = QTableWidget()
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         table_layout.addWidget(self.table, 1)
@@ -196,28 +197,28 @@ class ExplorerPage(BasePage):
             self.summary_label.setText(
                 f"总 {s['total']}  |  启用 {s['enabled']}  |  禁用 {s['disabled']}"
             )
-            # 动态更新电压下拉（按连续段分组）
+            # 动态更新电压下拉（按连续段分组，按时间排序）
             self.volt_filter.blockSignals(True)
             self.volt_filter.clear()
             self.volt_filter.addItem("全部")
             cur = self.dm._conn.cursor()
-            cur.execute("SELECT id, actual_voltage FROM records ORDER BY id")
+            cur.execute("SELECT id, actual_voltage, system_time FROM records ORDER BY id")
             rows = cur.fetchall()
-            segments = []  # [(v, id_start, id_end), ...]
-            for rid, v in rows:
+            segments = []  # [(v, id_start, id_end, time_start), ...]
+            for rid, v, ts in rows:
                 if segments and segments[-1][0] == v:
-                    segments[-1] = (v, segments[-1][1], rid)
+                    segments[-1] = (v, segments[-1][1], rid, segments[-1][3])
                 else:
-                    segments.append((v, rid, rid))
-            # 合并或显示
+                    segments.append((v, rid, rid, ts))
             from collections import Counter
             seg_counter = Counter()
-            for v, _, _ in segments:
+            for v, _, _, _ in segments:
                 seg_counter[v] += 1
             seg_index = Counter()
-            for v, id_start, id_end in segments:
+            for v, id_start, id_end, first_ts in segments:
                 seg_index[v] += 1
-                label = f"{v}V ({seg_index[v]}/{seg_counter[v]})"
+                time_str = str(first_ts)[:16] if first_ts else ""
+                label = f"{v:+.0f}V ({seg_index[v]}/{seg_counter[v]}) {time_str}"
                 where = f"actual_voltage = {v} AND id BETWEEN {id_start} AND {id_end}"
                 self.volt_filter.addItem(label, where)
             self.volt_filter.blockSignals(False)

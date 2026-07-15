@@ -71,14 +71,8 @@ def fetch_page(conn, offset: int, limit: int, fields: Optional[list[str]] = None
     field_csv = ", ".join(fields)
 
     cur = conn.cursor()
-
-    # 获取最小 ROWID
-    cur.execute("SELECT MIN(ROWID) FROM YS_DB.TB_MODBUS_DEV_POINT")
-    min_rowid = cur.fetchone()[0]
-    start_rowid = min_rowid + offset - 1
-
-    sql = f"SELECT {field_csv} FROM YS_DB.TB_MODBUS_DEV_POINT WHERE ROWID > ? ORDER BY ROWID LIMIT ?"
-    cur.execute(sql, (start_rowid, limit))
+    sql = f"SELECT {field_csv} FROM YS_DB.TB_MODBUS_DEV_POINT ORDER BY ROWID LIMIT ? OFFSET ?"
+    cur.execute(sql, (limit, offset))
     rows = cur.fetchall()
     col_names = [desc[0] for desc in cur.description]
     return col_names, rows

@@ -73,7 +73,7 @@ class ProjectPage(BasePage):
         import_layout.addWidget(QLabel("跳过前N条:"))
         self.skip_spin = QSpinBox()
         self.skip_spin.setRange(0, 100)
-        self.skip_spin.setValue(10)
+        self.skip_spin.setValue(0)
         self.skip_spin.setToolTip("每个电压等级前 N 条自动禁用（数据不稳定期）")
         self.skip_spin.setFixedWidth(60)
         import_layout.addWidget(self.skip_spin)

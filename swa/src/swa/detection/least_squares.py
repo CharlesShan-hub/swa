@@ -9,6 +9,7 @@
   - harm_a1:      FFT 基波幅值
   - temperature:  环境温度（z-score 归一化）
   - humidity:     环境湿度（z-score 归一化）
+  - rpm:          转子转速（z-score 归一化）
 
 归一化:
   在训练集上计算各特征的均值/标准差，同步应用到测试集，
@@ -70,7 +71,7 @@ def _extract_features(wave: np.ndarray) -> dict[str, float]:
     return features
 
 
-_FEATURE_NAMES = ["alpha_7", "score", "harm_a1", "temperature", "humidity"]
+_FEATURE_NAMES = ["alpha_7", "score", "harm_a1", "temperature", "humidity", "rpm"]
 
 
 def _apply_window(df: pd.DataFrame, window_size: int) -> pd.DataFrame:
@@ -155,7 +156,7 @@ def _load_data(
 
     # 获取全部数据（按 id 排序以确保时间顺序）
     rows = conn.execute("""
-        SELECT r.id, r.actual_voltage, r.temperature, r.humidity, w.wave_data
+        SELECT r.id, r.actual_voltage, r.temperature, r.humidity, r.rpm, w.wave_data
         FROM records r
         JOIN waveforms w ON w.record_id = r.id
         WHERE r.enabled = 1
@@ -167,7 +168,7 @@ def _load_data(
     # 提取特征
     records = []
     for row in rows:
-        rid, voltage, temp, humid, wave_str = row
+        rid, voltage, temp, humid, rpm_val, wave_str = row
         try:
             wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
         except (ValueError, TypeError, AttributeError):
@@ -180,6 +181,7 @@ def _load_data(
         feats["actual_voltage"] = voltage
         feats["temperature"] = float(temp) if temp is not None else 0.0
         feats["humidity"] = float(humid) if humid is not None else 0.0
+        feats["rpm"] = float(rpm_val) if rpm_val is not None else 0.0
         records.append(feats)
 
     df = pd.DataFrame(records)

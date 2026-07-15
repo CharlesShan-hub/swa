@@ -45,9 +45,6 @@ class DownloadWorker(QThread):
             self.finished.emit(0)
             return
 
-        cur.execute("SELECT MIN(ROWID) FROM YS_DB.TB_MODBUS_DEV_POINT")
-        min_rowid = cur.fetchone()[0]
-
         fields = [
             "TEST_CASE_CODE", "SYSTEM_TIME", "RTU_REGS_SLAVE_ID",
             "RTU_REGS_P00_ROTOR_RPM", "RTU_REGS_P00_ENV_TEMP",
@@ -66,9 +63,9 @@ class DownloadWorker(QThread):
                 this_batch = min(self.batch, actual_limit - exported)
                 if this_batch <= 0:
                     break
-                start_rowid = min_rowid + self.offset + exported - 1
-                sql = f"SELECT {field_csv} FROM YS_DB.TB_MODBUS_DEV_POINT WHERE ROWID > ? ORDER BY ROWID LIMIT ?"
-                cur.execute(sql, (start_rowid, this_batch))
+                offset = self.offset + exported
+                sql = f"SELECT {field_csv} FROM YS_DB.TB_MODBUS_DEV_POINT ORDER BY ROWID LIMIT ? OFFSET ?"
+                cur.execute(sql, (this_batch, offset))
                 rows = cur.fetchall()
                 if not rows:
                     break
@@ -98,9 +95,9 @@ class DownloadPage(BasePage):
         conn_form.setSpacing(6)
 
         ip_row = QHBoxLayout()
-        self.ip_edit = QLineEdit("10.15.52.21")
+        self.ip_edit = QLineEdit("10.15.10.1")
         self.ip_edit.setFixedWidth(150)
-        self.port_edit = QLineEdit("502")
+        self.port_edit = QLineEdit("5256")
         self.port_edit.setFixedWidth(70)
         ip_row.addWidget(self.ip_edit)
         ip_row.addWidget(QLabel(":"))
@@ -203,8 +200,12 @@ class DownloadPage(BasePage):
         try:
             import dmPython
             self.conn = dmPython.connect(user=user, password=pwd, server=ip, port=port, autoCommit=True)
-            self.log.appendPlainText("数据库连接成功！")
-            self.conn_status.setText(f"已连接 {ip}:{port}")
+            # 查总记录数
+            cur = self.conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM YS_DB.TB_MODBUS_DEV_POINT")
+            total = cur.fetchone()[0]
+            self.log.appendPlainText(f"数据库连接成功！总记录数: {total}")
+            self.conn_status.setText(f"已连接 {ip}:{port}  (共 {total} 条)")
             self.conn_status.setStyleSheet("color: #2e7d32; font-size: 12px;")
         except Exception as e:
             self.log.appendPlainText(f"连接失败: {e}")
