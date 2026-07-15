@@ -448,14 +448,23 @@ class DataManager:
         insert_sql = """
             INSERT INTO records
                 (system_time, actual_voltage, temperature, humidity,
-                 rpm, slave_id, test_case_code, harm_a1, harm_a2, harm_error,
+                 rpm, slave_id, test_case_code, enabled,
+                 harm_a1, harm_a2, harm_error,
                  harm_cycles, harm_thd, harm_noise_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         wave_sql = "INSERT INTO waveforms (record_id, wave_data) VALUES (?, ?)"
 
         for _, row in df.iterrows():
             vals = list(row.get(c) if pd.notna(row.get(c)) else None for c in ["system_time", "actual_voltage", "temperature", "humidity", "rpm", "slave_id", "test_case_code"])
+
+            # 读取 jsonl 中的启用状态
+            # 0=禁用, 1=启用, 2或缺失=默认启用
+            raw_enabled = row.get("enabled")
+            if pd.notna(raw_enabled) and int(raw_enabled) == 0:
+                vals.append(0)
+            else:
+                vals.append(1)
 
             # 计算谐波参数
             wave_str = str(row.get(wave_col)) if wave_col and row.get(wave_col) else None

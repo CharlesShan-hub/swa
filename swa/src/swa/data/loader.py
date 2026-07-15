@@ -45,6 +45,7 @@ def load_jsonl(path: str) -> pd.DataFrame:
         "RTU_REGS_P00_ROTOR_RPM": "rpm",
         "TEST_CASE_CODE": "test_case_code",
         "RTU_REGS_SLAVE_ID": "slave_id",
+        "ENABLED": "enabled",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
 

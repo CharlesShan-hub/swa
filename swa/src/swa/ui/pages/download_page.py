@@ -74,6 +74,7 @@ class DownloadWorker(QThread):
                     record = dict(zip(col_names, row))
                     if record.get("SYSTEM_TIME"):
                         record["SYSTEM_TIME"] = str(record["SYSTEM_TIME"])
+                    record["ENABLED"] = 2  # 默认未知，导入时决定启用
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 exported += len(rows)
                 self.progress.emit(exported, actual_limit)

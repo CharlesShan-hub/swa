@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QSplitter, QAbstractItemView, QSpinBox, QLineEdit,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QShortcut, QKeySequence
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -30,6 +30,12 @@ from pyecharts.globals import ThemeType
 
 from swa.data.manager import DataManager
 from swa.ui.widgets.base_page import BasePage
+
+import json
+
+LOCAL_JSONL = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "..", "data", "local.jsonl"
+)
 
 
 class ExplorerPage(BasePage):
@@ -130,12 +136,15 @@ class ExplorerPage(BasePage):
 
         # 表格操作
         table_ops = QHBoxLayout()
-        self.disable_btn = QPushButton("禁用选中行")
+        self.disable_btn = QPushButton("禁用选中行 [2]")
         self.disable_btn.clicked.connect(self._disable_selected)
         table_ops.addWidget(self.disable_btn)
-        self.enable_btn = QPushButton("启用选中行")
+        self.enable_btn = QPushButton("启用选中行 [1]")
         self.enable_btn.clicked.connect(self._enable_selected)
         table_ops.addWidget(self.enable_btn)
+        self.sync_btn = QPushButton("同步到 jsonl")
+        self.sync_btn.clicked.connect(self._sync_to_jsonl)
+        table_ops.addWidget(self.sync_btn)
         self.status_label = QLabel("")
         table_ops.addWidget(self.status_label)
         table_ops.addStretch()
@@ -149,6 +158,11 @@ class ExplorerPage(BasePage):
         self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         table_layout.addWidget(self.table, 1)
         splitter.addWidget(table_widget)
+
+        # ── 键盘快捷键 ──────────────────────────────────────────
+        QShortcut(QKeySequence("Return"), self.table, self._key_next_row)
+        QShortcut(QKeySequence("1"), self.table, self._key_enable)
+        QShortcut(QKeySequence("2"), self.table, self._key_disable)
 
         splitter.setSizes([250, 400])
         self.content.addWidget(splitter, 1)
@@ -358,7 +372,7 @@ class ExplorerPage(BasePage):
         rows = self.table.selectionModel().selectedRows()
         # 单选时才显示波形
         if len(rows) == 1:
-            item = self.table.item(rows[0].row(), 0)
+            item = self.table.item(rows[0].row(), 1)  # ID 在第 2 列
             if item:
                 try:
                     self._show_waveform(int(item.text()))
@@ -461,13 +475,13 @@ class ExplorerPage(BasePage):
         if df is None:
             self.table.setRowCount(0)
             return
-        cols = ["id", "system_time", "actual_voltage", "temperature", "humidity",
+        cols = ["enabled", "id", "system_time", "actual_voltage", "temperature", "humidity",
                 "harm_cycles", "harm_a1", "harm_a2", "harm_error",
-                "harm_thd", "harm_noise_pct", "enabled"]
+                "harm_thd", "harm_noise_pct"]
         self.table.setColumnCount(len(cols))
-        self.table.setHorizontalHeaderLabels(["ID", "时间", "电压(V)", "温度", "湿度",
+        self.table.setHorizontalHeaderLabels(["启用", "ID", "时间", "电压(V)", "温度", "湿度",
                                              "周期", "A1", "A2", "误差",
-                                             "THD", "噪声%", "启用"])
+                                             "THD", "噪声%"])
         self.table.setRowCount(len(df))
         for i, (_, row) in enumerate(df.iterrows()):
             for j, col in enumerate(cols):
@@ -483,10 +497,11 @@ class ExplorerPage(BasePage):
                 else:
                     text = str(val) if val is not None else ""
                 item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 if col == "enabled":
                     item.setBackground(Qt.green if val == 1 else Qt.red)
                 self.table.setItem(i, j, item)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
 
     # ── 行级质量操作 ────────────────────────────────────────────
 
@@ -496,7 +511,7 @@ class ExplorerPage(BasePage):
             rows.add(item.row())
         ids = []
         for r in rows:
-            item = self.table.item(r, 0)
+            item = self.table.item(r, 1)  # ID 在第 2 列（索引 1）
             if item:
                 try:
                     ids.append(int(item.text()))
@@ -523,3 +538,54 @@ class ExplorerPage(BasePage):
         s = self.dm.summary()
         self.summary_label.setText(f"总 {s['total']}  |  启用 {s['enabled']}  |  禁用 {s['disabled']}")
         self._refresh_table()
+
+    # ── 键盘快捷键 ────────────────────────────────────────────
+
+    def _key_next_row(self):
+        """回车 → 下一行。"""
+        row = self.table.currentRow()
+        if row < self.table.rowCount() - 1:
+            self.table.selectRow(row + 1)
+
+    def _key_enable(self):
+        """1 → 启用选中行。"""
+        self._enable_selected()
+
+    def _key_disable(self):
+        """2 → 禁用选中行。"""
+        self._disable_selected()
+
+    # ── 同步到 jsonl ─────────────────────────────────────────
+
+    def _sync_to_jsonl(self):
+        """将当前项目的启用状态写回 local.jsonl。"""
+        if self.dm._conn is None or not os.path.exists(LOCAL_JSONL):
+            self.status_label.setText("请先加载项目")
+            return
+
+        # 读取数据库所有记录的 id 和 enabled 状态（按 id 排序）
+        cur = self.dm._conn.cursor()
+        cur.execute("SELECT id, enabled FROM records ORDER BY id")
+        id_enabled = dict(cur.fetchall())
+
+        # 读取 jsonl，按行号映射到 record id
+        with open(LOCAL_JSONL, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        updated = 0
+        for i, line in enumerate(lines):
+            record_id = i + 1  # 第 0 行 → id=1
+            if record_id in id_enabled:
+                rec = json.loads(line)
+                new_enabled = id_enabled[record_id]
+                if rec.get("ENABLED") != new_enabled:
+                    rec["ENABLED"] = new_enabled
+                    lines[i] = json.dumps(rec, ensure_ascii=False) + "\n"
+                    updated += 1
+
+        if updated > 0:
+            with open(LOCAL_JSONL, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            self.status_label.setText(f"已同步 {updated} 条到 local.jsonl")
+        else:
+            self.status_label.setText("无需同步")
