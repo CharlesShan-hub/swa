@@ -75,14 +75,15 @@ def main(input, model, plot, output):
     click.echo(f"  R²:   {r2:.4f}")
 
     # 分电压统计
-    click.echo(f"\n分电压 MAE:")
+    click.echo(f"\n各测试电压 MAE:")
     unique_voltages = sorted(set(actuals))
     for v in unique_voltages:
         mask = actuals == v
         if np.sum(mask) > 0:
             v_mae = float(np.mean(np.abs(errors[mask])))
+            v_pred_mean = float(np.mean(preds[mask]))
             cnt = int(np.sum(mask))
-            click.echo(f"  {v:+.0f}V: {v_mae:.2f}V (n={cnt})")
+            click.echo(f"  {v:+.0f}V: MAE={v_mae:.3f}V  预测均值={v_pred_mean:.2f}V  (n={cnt})")
 
     # 绘图
     if plot:

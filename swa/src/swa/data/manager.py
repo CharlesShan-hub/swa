@@ -71,6 +71,7 @@ class DataManager:
         description: str = "",
         label_map: Optional[dict[str, float]] = None,
         skip_first_n: int = 0,
+        start_from_line: int = 0,
     ) -> dict:
         """从 JSONL 文件创建新项目。
 
@@ -80,6 +81,7 @@ class DataManager:
             description: 项目描述
             label_map: 电压标签替换映射 {标签: 电压值}
             skip_first_n: 每个电压等级前 N 条自动禁用（默认 0）
+            start_from_line: 跳过 JSONL 前 N 行不读取（默认 0）
         """
         project_dir = os.path.join(self.projects_dir, name)
         if os.path.exists(project_dir):
@@ -88,7 +90,7 @@ class DataManager:
         os.makedirs(project_dir)
 
         # 加载并清洗（使用自定义标签映射）
-        df = load_jsonl(source_jsonl)
+        df = load_jsonl(source_jsonl, skip_lines=start_from_line)
         df["actual_voltage"] = df["actual_voltage"].apply(
             lambda v: parse_voltage(v, label_map)
         )
@@ -131,6 +133,7 @@ class DataManager:
             "total_records": len(df),
             "enabled_records": len(df) - (skip_first_n if skip_first_n > 0 else 0),
             "label_map": label_map or {},
+            "start_from_line": start_from_line,
         }
         with open(os.path.join(project_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -160,6 +163,13 @@ class DataManager:
             self.backfill_harmonics()
         except Exception:
             pass
+
+        # 迁移：添加 predicted_voltage_1~5 列（已有项目）
+        for i in range(1, 6):
+            try:
+                self._conn.execute(f"ALTER TABLE records ADD COLUMN predicted_voltage_{i} REAL")
+            except Exception:
+                pass  # 列已存在
 
         # 更新 meta 中的统计
         meta = self._load_meta()
@@ -270,7 +280,7 @@ class DataManager:
             - harm_a1 IS NULL → 坏数据（无有效波形）
             - harm_cycles NOT BETWEEN 6.5 AND 7.5 → 周期数不对
             - harm_thd > 0.30 → 总谐波失真过大（方波、削波等）
-            - harm_noise_pct > 0.50 → 超过一半能量不在基频（强噪声）
+            - harm_noise_pct > 0.30 → 超过30%能量不在基频（噪声较大）
             - harm_a2 / harm_a1 > 0.25 → 二次谐波过大
             - harm_error / harm_a1 > 0.30 → 拟合误差过大
 
@@ -286,7 +296,7 @@ class DataManager:
                     OR harm_cycles < 6.5
                     OR harm_cycles > 7.5
                     OR harm_thd > 0.30
-                    OR harm_noise_pct > 0.50
+                    OR harm_noise_pct > 0.30
                     OR (harm_a2 / harm_a1) > 0.25
                     OR (harm_error / harm_a1) > 0.30
                 )
@@ -321,6 +331,29 @@ class DataManager:
             offset += batch_size
         self._conn.commit()
         return total
+
+    def backfill_predicted(self, results: list[dict], buffer_index: int = 1):
+        """回填预测电压到 records 表的指定缓冲区。
+
+        Args:
+            results: 每个元素为 {"id": int, "pred": float}
+            buffer_index: 缓冲区编号 1-5（对应 predicted_voltage_1~5）
+        """
+        if buffer_index < 1 or buffer_index > 5:
+            raise ValueError("buffer_index 必须在 1-5 之间")
+        col = f"predicted_voltage_{buffer_index}"
+        cur = self._conn.cursor()
+        cur.execute("SELECT MAX(rowid) FROM records")
+        max_id = cur.fetchone()[0] or 0
+        for r in results:
+            rid = r["id"]
+            pred = float(r["pred"])
+            if 1 <= rid <= max_id:
+                cur.execute(
+                    f"UPDATE records SET {col} = ? WHERE id = ?",
+                    (round(pred, 2), rid),
+                )
+        self._conn.commit()
 
     def quality_summary(self) -> dict:
         """质量统计。"""
@@ -400,6 +433,7 @@ class DataManager:
                 humidity        REAL,
                 rpm             REAL,
                 slave_id        INTEGER,
+                device_id       TEXT,
                 test_case_code  TEXT,
                 enabled         INTEGER DEFAULT 1,
                 harm_a1         REAL,
@@ -433,6 +467,7 @@ class DataManager:
             "humidity": "humidity",
             "rpm": "rpm",
             "slave_id": "slave_id",
+            "device_id": "device_id",
             "test_case_code": "test_case_code",
         }
         # 波形列
@@ -448,15 +483,15 @@ class DataManager:
         insert_sql = """
             INSERT INTO records
                 (system_time, actual_voltage, temperature, humidity,
-                 rpm, slave_id, test_case_code, enabled,
+                 rpm, slave_id, device_id, test_case_code, enabled,
                  harm_a1, harm_a2, harm_error,
                  harm_cycles, harm_thd, harm_noise_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         wave_sql = "INSERT INTO waveforms (record_id, wave_data) VALUES (?, ?)"
 
         for _, row in df.iterrows():
-            vals = list(row.get(c) if pd.notna(row.get(c)) else None for c in ["system_time", "actual_voltage", "temperature", "humidity", "rpm", "slave_id", "test_case_code"])
+            vals = list(row.get(c) if pd.notna(row.get(c)) else None for c in ["system_time", "actual_voltage", "temperature", "humidity", "rpm", "slave_id", "device_id", "test_case_code"])
 
             # 读取 jsonl 中的启用状态
             # 0=禁用, 1=启用, 2或缺失=默认启用

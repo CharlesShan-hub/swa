@@ -66,7 +66,7 @@ def fetch_page(conn, offset: int, limit: int, fields: Optional[list[str]] = None
             "TEST_CASE_CODE", "SYSTEM_TIME", "RTU_REGS_SLAVE_ID",
             "RTU_REGS_P00_ROTOR_RPM", "RTU_REGS_P00_ENV_TEMP",
             "RTU_REGS_P00_ENV_HUMIDITY", "ACTUAL_VOLTAGE",
-            "RTU_REGS_P00_WAVE_DATA",
+            "RTU_REGS_P00_WAVE_DATA", "DEVICE_ID",
         ]
     field_csv = ", ".join(fields)
 

@@ -9,12 +9,13 @@ import numpy as np
 import pandas as pd
 
 
-def load_jsonl(path: str) -> pd.DataFrame:
+def load_jsonl(path: str, skip_lines: int = 0) -> pd.DataFrame:
     """
     从 JSONL 文件加载数据。
 
     Args:
         path: JSONL 文件路径
+        skip_lines: 跳过前 N 行不读取（默认 0）
 
     Returns:
         DataFrame，包含字段:
@@ -27,7 +28,9 @@ def load_jsonl(path: str) -> pd.DataFrame:
     """
     records = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for i, line in enumerate(f):
+            if i < skip_lines:
+                continue
             line = line.strip()
             if not line:
                 continue
@@ -45,6 +48,7 @@ def load_jsonl(path: str) -> pd.DataFrame:
         "RTU_REGS_P00_ROTOR_RPM": "rpm",
         "TEST_CASE_CODE": "test_case_code",
         "RTU_REGS_SLAVE_ID": "slave_id",
+        "DEVICE_ID": "device_id",
         "ENABLED": "enabled",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})

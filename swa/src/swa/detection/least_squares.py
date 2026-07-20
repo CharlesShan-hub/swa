@@ -74,6 +74,68 @@ def _extract_features(wave: np.ndarray) -> dict[str, float]:
 _FEATURE_NAMES = ["alpha_7", "score", "harm_a1", "temperature", "humidity", "rpm"]
 
 
+def _compute_a1_mapping(
+    db_path: str,
+    ref_device_id: str,
+    target_device_id: str,
+) -> callable:
+    """计算目标设备到基准设备的 A1 电压映射函数。
+
+    对每个电压等级计算 A1_target / A1_ref 的比值，
+    然后拟合 ratio(v) = a×v + b，
+    返回一个函数 f(a1, v) = a1 / ratio(v)，把目标 A1 校正到基准水平。
+
+    Args:
+        db_path: SQLite 数据库路径
+        ref_device_id: 基准设备 ID
+        target_device_id: 目标设备 ID
+
+    Returns:
+        映射函数 f(a1, v) = a1_corrected
+        或 None（数据不足时）
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT actual_voltage, AVG(harm_a1)
+        FROM records
+        WHERE enabled=1 AND device_id=? AND harm_a1 IS NOT NULL
+        GROUP BY actual_voltage
+        ORDER BY actual_voltage
+    """, (ref_device_id,))
+    ref_rows = dict(cur.fetchall())
+
+    cur.execute("""
+        SELECT actual_voltage, AVG(harm_a1)
+        FROM records
+        WHERE enabled=1 AND device_id=? AND harm_a1 IS NOT NULL
+        GROUP BY actual_voltage
+        ORDER BY actual_voltage
+    """, (target_device_id,))
+    target_rows = dict(cur.fetchall())
+
+    # 找共同的电压
+    common_v = sorted(set(ref_rows.keys()) & set(target_rows.keys()))
+    conn.close()
+    if len(common_v) < 3:
+        return None
+
+    voltages = np.array(common_v)
+    ratios = np.array([target_rows[v] / ref_rows[v] for v in common_v])
+
+    # 线性拟合: ratio = a×v + b
+    coeffs = np.polyfit(voltages, ratios, 1)
+
+    def mapper(a1: float, voltage: float) -> float:
+        ratio = coeffs[0] * abs(voltage) + coeffs[1]
+        if ratio < 0.01:
+            return a1
+        return a1 / ratio
+
+    conn.close()
+    return mapper
+
+
 def _apply_window(df: pd.DataFrame, window_size: int) -> pd.DataFrame:
     """对每个电压等级内的记录做滑动窗口平均。
 
@@ -120,6 +182,9 @@ def _load_data(
     test_voltages: list[float],
     window_size: int = 1,
     max_samples_per_voltage: int = 0,
+    device_id: Optional[str] = None,
+    device_mapping: bool = False,
+    ref_device_id: Optional[str] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """加载训练集和测试集的波形数据。
 
@@ -129,6 +194,9 @@ def _load_data(
         test_voltages: 测试电压列表
         window_size: 滑动窗口大小（默认 1 = 不做平均）
         max_samples_per_voltage: 每电压最大样本数（<=0 不限）
+        device_id: 按设备 ID 过滤（None=全部设备）
+        device_mapping: 是否启用设备映射校准
+        ref_device_id: 基准设备 ID（映射目标）
 
     Returns:
         (train_df, test_df), 每列包含 actual_voltage 和各特征
@@ -136,9 +204,21 @@ def _load_data(
     db_path = os.path.join(project_dir, "data.db")
     conn = sqlite3.connect(db_path)
 
+    # 构建查询条件
+    where_clauses = ["enabled = 1"]
+    params = []
+    if device_id:
+        where_clauses.append("device_id = ?")
+        params.append(device_id)
+
+    where_sql = " AND ".join(where_clauses)
+
     # 先查数据库里有哪些电压
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT actual_voltage FROM records ORDER BY actual_voltage")
+    cur.execute(
+        f"SELECT DISTINCT actual_voltage FROM records WHERE {where_sql} ORDER BY actual_voltage",
+        params,
+    )
     all_voltages = [r[0] for r in cur.fetchall()]
 
     # 匹配用户选择的电压
@@ -155,20 +235,21 @@ def _load_data(
     test_v = match_voltages(test_voltages)
 
     # 获取全部数据（按 id 排序以确保时间顺序）
-    rows = conn.execute("""
-        SELECT r.id, r.actual_voltage, r.temperature, r.humidity, r.rpm, w.wave_data
+    rows = conn.execute(f"""
+        SELECT r.id, r.actual_voltage, r.temperature, r.humidity, r.rpm,
+               r.device_id, w.wave_data
         FROM records r
         JOIN waveforms w ON w.record_id = r.id
-        WHERE r.enabled = 1
+        WHERE {where_sql}
         ORDER BY r.id
-    """).fetchall()
+    """, params).fetchall()
 
     conn.close()
 
     # 提取特征
     records = []
     for row in rows:
-        rid, voltage, temp, humid, rpm_val, wave_str = row
+        rid, voltage, temp, humid, rpm_val, dev_id, wave_str = row
         try:
             wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
         except (ValueError, TypeError, AttributeError):
@@ -182,9 +263,35 @@ def _load_data(
         feats["temperature"] = float(temp) if temp is not None else 0.0
         feats["humidity"] = float(humid) if humid is not None else 0.0
         feats["rpm"] = float(rpm_val) if rpm_val is not None else 0.0
+        feats["device_id"] = str(dev_id) if dev_id is not None else None
         records.append(feats)
 
     df = pd.DataFrame(records)
+
+    # 设备映射校准（A1 + 温湿度）
+    if device_mapping and ref_device_id and not device_id:
+        present_devices = df["device_id"].dropna().unique()
+        for target_dev in present_devices:
+            if target_dev == ref_device_id:
+                continue
+
+            # A1 电压映射
+            mask = df["device_id"] == target_dev
+            mapper = _compute_a1_mapping(db_path, ref_device_id, target_dev)
+            if mapper is not None:
+                df.loc[mask, "harm_a1"] = df.loc[mask].apply(
+                    lambda r: mapper(r["harm_a1"], r["actual_voltage"]), axis=1
+                )
+
+            # 温湿度常数偏移校正
+            ref_sub = df[df["device_id"] == ref_device_id]
+            tgt_sub = df[df["device_id"] == target_dev]
+            dt = tgt_sub["temperature"].mean() - ref_sub["temperature"].mean()
+            dh = tgt_sub["humidity"].mean() - ref_sub["humidity"].mean()
+            df.loc[mask, "temperature"] -= dt
+            df.loc[mask, "humidity"] -= dh
+
+    conn.close()
 
     # 滑动窗口平均
     if window_size > 1:
@@ -247,6 +354,9 @@ def run(
     test_voltages: list[float],
     window_size: int = 1,
     max_samples_per_voltage: int = 0,
+    device_id: Optional[str] = None,
+    device_mapping: bool = False,
+    ref_device_id: Optional[str] = None,
 ) -> dict:
     """运行最小二乘法检测。
 
@@ -256,6 +366,9 @@ def run(
         test_voltages: 用于测试的电压值列表
         window_size: 滑动窗口大小（默认 1 = 不做平均）
         max_samples_per_voltage: 每电压最多样本数（<=0 不限）
+        device_id: 按设备 ID 过滤（None=全部设备）
+        device_mapping: 是否启用设备映射校准
+        ref_device_id: 基准设备 ID（映射目标）
 
     Returns:
         dict: {
@@ -279,6 +392,9 @@ def run(
         project_dir, train_voltages, test_voltages,
         window_size=window_size,
         max_samples_per_voltage=max_samples_per_voltage,
+        device_id=device_id,
+        device_mapping=device_mapping,
+        ref_device_id=ref_device_id,
     )
 
     if len(train_df) < 5:
@@ -321,8 +437,9 @@ def run(
     train_metrics = calc_metrics(train_actual_abs, train_pred)
     test_metrics = calc_metrics(test_actual_abs, test_pred)
 
-    # 各电压 MAE（按绝对值分组，+110V 和 -110V 合并）
+    # 各电压 MAE 和预测均值（按绝对值分组，+110V 和 -110V 合并）
     voltage_mae = {}
+    voltage_pred_mean = {}
     test_df_abs = test_df.copy()
     test_df_abs["abs_voltage"] = test_df_abs["actual_voltage"].abs()
     for v_abs in sorted(set(test_df_abs["abs_voltage"])):
@@ -330,6 +447,7 @@ def run(
         v_actual = test_df_abs.loc[mask, "abs_voltage"].values
         v_pred = test_pred[mask]
         voltage_mae[f"{v_abs:.0f}V"] = float(np.mean(np.abs(v_actual - v_pred)))
+        voltage_pred_mean[f"{v_abs:.0f}V"] = float(np.mean(v_pred))
 
     # 构建结果列表（窗口模式用 window_ids，否则用 id）
     use_window = window_size > 1
@@ -364,7 +482,10 @@ def run(
         "train_results": train_results,
         "test_results": test_results,
         "voltage_mae": voltage_mae,
+        "voltage_pred_mean": voltage_pred_mean,
         "window_size": window_size,
         "max_samples_per_voltage": max_samples_per_voltage,
         "norm_params": norm_params,
+        "device_mapping": device_mapping,
+        "ref_device_id": ref_device_id,
     }

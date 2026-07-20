@@ -70,6 +70,13 @@ class ProjectPage(BasePage):
         self.name_edit.setPlaceholderText("例如: week1")
         import_layout.addWidget(self.name_edit, 1)
         import_layout.addSpacing(16)
+        import_layout.addWidget(QLabel("从第N行开始:"))
+        self.start_spin = QSpinBox()
+        self.start_spin.setRange(0, 999999)
+        self.start_spin.setValue(85510)
+        self.start_spin.setToolTip("跳过 JSONL 前 N 行，不导入旧数据")
+        self.start_spin.setFixedWidth(80)
+        import_layout.addWidget(self.start_spin)
         import_layout.addWidget(QLabel("跳过前N条:"))
         self.skip_spin = QSpinBox()
         self.skip_spin.setRange(0, 100)
@@ -187,15 +194,18 @@ class ProjectPage(BasePage):
             return
 
         try:
+            start_line = self.start_spin.value()
             meta = self.dm.create_project(
                 name, LOCAL_JSONL,
                 description="从 local.jsonl 导入",
                 label_map=self.label_map,
                 skip_first_n=self.skip_spin.value(),
+                start_from_line=start_line,
             )
             QMessageBox.information(
                 self, "导入完成",
                 f"项目 '{name}' 导入成功\n"
+                f"跳过前 {start_line} 行\n"
                 f"总记录: {meta['total_records']} 条\n"
                 f"自动禁用: {self.skip_spin.value()} 条/电压\n"
                 f"标签规则: {len(self.label_map)} 条"

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QAbstractItemView, QSpinBox, QLineEdit,
+    QCheckBox,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QShortcut, QKeySequence
@@ -131,6 +132,16 @@ class ExplorerPage(BasePage):
         self.status_filter.currentTextChanged.connect(self._on_filter_changed)
         self.status_filter.setFixedWidth(70)
         filter_row.addWidget(self.status_filter)
+        filter_row.addSpacing(12)
+
+        filter_row.addWidget(QLabel("预测缓冲区:"))
+        self.buffer_checks: list[QCheckBox] = []
+        for i in range(1, 6):
+            cb = QCheckBox(f"P{i}")
+            cb.setChecked(False)
+            cb.stateChanged.connect(self._on_filter_changed)
+            filter_row.addWidget(cb)
+            self.buffer_checks.append(cb)
         filter_row.addStretch()
         table_layout.addLayout(filter_row)
 
@@ -385,7 +396,9 @@ class ExplorerPage(BasePage):
         df = self.dm.query(
             fields=["id", "system_time", "actual_voltage", "temperature", "humidity",
                     "enabled", "harm_a1", "harm_a2", "harm_error",
-                    "harm_cycles", "harm_thd", "harm_noise_pct"],
+                    "harm_cycles", "harm_thd", "harm_noise_pct",
+                    "predicted_voltage_1", "predicted_voltage_2", "predicted_voltage_3",
+                    "predicted_voltage_4", "predicted_voltage_5"],
             where=self._build_where(),
             enabled_only=False, order_by="system_time",
         )
@@ -399,12 +412,21 @@ class ExplorerPage(BasePage):
         n = len(df)
         x = [str(i) for i in range(1, n + 1)]
 
+        # 电压 + 选中的预测缓冲区
         line_volt = (Line().add_xaxis(x)
-            .add_yaxis("电压 (V)", df["actual_voltage"].round(1).tolist(), is_smooth=True, symbol="none")
-            .set_global_opts(title_opts=opts.TitleOpts(title="电压"),
-                yaxis_opts=opts.AxisOpts(name="电压 (V)"),
-                datazoom_opts=[opts.DataZoomOpts(xaxis_index=[0, 1, 2])],
-                tooltip_opts=opts.TooltipOpts(trigger="axis")))
+            .add_yaxis("电压 (V)", df["actual_voltage"].round(1).tolist(), is_smooth=True, symbol="none"))
+        for i, cb in enumerate(self.buffer_checks):
+            if cb.isChecked():
+                col = f"predicted_voltage_{i + 1}"
+                if col in df.columns:
+                    y = df[col].round(1).tolist()
+                    # 用 NaN 替换 None 以断开断点
+                    y = [v if v is not None else None for v in y]
+                    line_volt = line_volt.add_yaxis(f"预测P{i + 1}", y, is_smooth=True, symbol="none", linestyle_opts=opts.LineStyleOpts(width=1, type_="dashed"))
+        line_volt = line_volt.set_global_opts(title_opts=opts.TitleOpts(title="电压"),
+            yaxis_opts=opts.AxisOpts(name="电压 (V)"),
+            datazoom_opts=[opts.DataZoomOpts(xaxis_index=[0, 1, 2])],
+            tooltip_opts=opts.TooltipOpts(trigger="axis"))
         line_temp = (Line().add_xaxis(x)
             .add_yaxis("温度 (°C)", df["temperature"].round(1).tolist(), is_smooth=True, symbol="none")
             .set_global_opts(title_opts=opts.TitleOpts(title="温度"),
@@ -475,13 +497,22 @@ class ExplorerPage(BasePage):
         if df is None:
             self.table.setRowCount(0)
             return
-        cols = ["enabled", "id", "system_time", "actual_voltage", "temperature", "humidity",
-                "harm_cycles", "harm_a1", "harm_a2", "harm_error",
-                "harm_thd", "harm_noise_pct"]
+
+        # 基础列
+        cols = ["enabled", "id", "system_time", "actual_voltage"]
+        headers = ["启用", "ID", "时间", "电压(V)"]
+        # 追加选中的预测缓冲区列
+        for i, cb in enumerate(self.buffer_checks):
+            if cb.isChecked():
+                cols.append(f"predicted_voltage_{i + 1}")
+                headers.append(f"预测P{i + 1}")
+        # 其余列
+        cols += ["temperature", "humidity", "harm_cycles", "harm_a1", "harm_a2", "harm_error",
+                 "harm_thd", "harm_noise_pct"]
+        headers += ["温度", "湿度", "周期", "A1", "A2", "误差", "THD", "噪声%"]
+
         self.table.setColumnCount(len(cols))
-        self.table.setHorizontalHeaderLabels(["启用", "ID", "时间", "电压(V)", "温度", "湿度",
-                                             "周期", "A1", "A2", "误差",
-                                             "THD", "噪声%"])
+        self.table.setHorizontalHeaderLabels(headers)
         self.table.setRowCount(len(df))
         for i, (_, row) in enumerate(df.iterrows()):
             for j, col in enumerate(cols):
@@ -494,6 +525,8 @@ class ExplorerPage(BasePage):
                     text = f"{val:.1f}" if pd.notna(val) else ""
                 elif col == "enabled":
                     text = str(int(val)) if pd.notna(val) else ""
+                elif col.startswith("predicted_voltage"):
+                    text = f"{val:.1f}" if pd.notna(val) else ""
                 else:
                     text = str(val) if val is not None else ""
                 item = QTableWidgetItem(text)

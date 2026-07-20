@@ -15,6 +15,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
+from matplotlib.figure import Figure
+import matplotlib
+matplotlib.use("QtAgg")
+matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei"]
+matplotlib.rcParams["axes.unicode_minus"] = False
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import pandas as pd
+
 from swa.data.manager import DataManager
 from swa.detection import METHODS
 from swa.ui.widgets.base_page import BasePage
@@ -30,6 +40,7 @@ class DetectionPage(BasePage):
         self.dm = DataManager()
         self._all_voltages: list[float] = []
         self._project_dir: str | None = None
+        self._last_result: dict | None = None
 
         # ── 顶栏：项目 + 方法选择 ──────────────────────────────
         top_row = QHBoxLayout()
@@ -146,6 +157,43 @@ class DetectionPage(BasePage):
             lambda v: self.max_samples_info.setText(f"(上限{v}条)" if v > 0 else "(0=不限)")
         )
 
+        param_row.addSpacing(24)
+        param_row.addWidget(QLabel("设备:"))
+        self.device_combo = QComboBox()
+        self.device_combo.setMinimumWidth(100)
+        self.device_combo.setToolTip("按设备 ID 过滤，选择具体设备时只分析该设备的数据")
+        param_row.addWidget(self.device_combo)
+
+        self.mapping_cb = QPushButton("映射校准")
+        self.mapping_cb.setCheckable(True)
+        self.mapping_cb.setFixedHeight(24)
+        self.mapping_cb.setToolTip("启用后，将非基准设备的 A1 通过电压映射校正到基准设备水平")
+        self.mapping_cb.toggled.connect(self._on_mapping_toggled)
+        param_row.addWidget(self.mapping_cb)
+
+        self.ref_device_combo = QComboBox()
+        self.ref_device_combo.setMinimumWidth(100)
+        self.ref_device_combo.setToolTip("选择作为基准的设备")
+        self.ref_device_combo.setVisible(False)
+        param_row.addWidget(self.ref_device_combo)
+
+        param_row.addSpacing(12)
+
+        param_row.addWidget(QLabel("回填到:"))
+        self.buffer_combo = QComboBox()
+        for i in range(1, 6):
+            self.buffer_combo.addItem(f"缓冲区 {i}", i)
+        self.buffer_combo.setFixedWidth(100)
+        self.buffer_combo.setToolTip("选择将预测结果回填到哪个缓冲区（1-5）")
+        param_row.addWidget(self.buffer_combo)
+
+        self.backfill_btn = QPushButton("回填预测值")
+        self.backfill_btn.setFixedHeight(24)
+        self.backfill_btn.setEnabled(False)
+        self.backfill_btn.setToolTip("将预测结果写回数据库指定缓冲区，可在数据探索页查看")
+        self.backfill_btn.clicked.connect(self._backfill_predicted)
+        param_row.addWidget(self.backfill_btn)
+
         param_row.addStretch()
 
         self.run_btn = QPushButton("运行检测")
@@ -193,6 +241,9 @@ class DetectionPage(BasePage):
 
     # ── 加载项目 ────────────────────────────────────────────────
 
+    def _on_mapping_toggled(self, checked: bool):
+        self.ref_device_combo.setVisible(checked)
+
     def _load_project(self):
         name = self.project_combo.currentData()
         if not name:
@@ -212,6 +263,19 @@ class DetectionPage(BasePage):
             rows = cur.fetchall()
             self._all_voltages = [r[0] for r in rows]
             self._voltage_counts = {r[0]: r[1] for r in rows}
+
+            # 填充设备下拉
+            self.device_combo.clear()
+            self.device_combo.addItem("全部设备", None)
+            cur.execute("SELECT DISTINCT device_id FROM records WHERE enabled=1 AND device_id IS NOT NULL ORDER BY device_id")
+            devices = [r[0] for r in cur.fetchall()]
+            for did in devices:
+                self.device_combo.addItem(f"设备 {did}", did)
+
+            # 填充基准设备下拉
+            self.ref_device_combo.clear()
+            for did in devices:
+                self.ref_device_combo.addItem(f"设备 {did}", did)
 
             # 填充电压列表：默认全部进训练集
             self.train_list.clear()
@@ -269,14 +333,20 @@ class DetectionPage(BasePage):
 
         window_size = self.window_spin.value()
         max_samples = self.max_samples_spin.value()
+        device_id = self.device_combo.currentData()
+        device_mapping = self.mapping_cb.isChecked()
+        ref_device_id = self.ref_device_combo.currentData() if device_mapping else None
         train_v = parse_voltages(self.train_list)
         test_v = parse_voltages(self.test_list)
         discard_v = parse_voltages(self.discard_list)
 
+        device_str = f"全部设备" if device_id is None else f"设备 {device_id}"
+        mapping_str = f"  映射到基准 {ref_device_id}" if device_mapping else ""
         self.log_text.setPlainText(
             f"训练电压: {', '.join(f'{v:+.0f}V' for v in sorted(train_v))}\n"
             f"测试电压: {', '.join(f'{v:+.0f}V' for v in sorted(test_v)) if test_v else '(无)'}\n"
             f"禁用电压: {', '.join(f'{v:+.0f}V' for v in sorted(discard_v)) if discard_v else '(无)'}\n"
+            f"设备: {device_str}{mapping_str}\n"
             f"滑动窗口: {'不启用' if window_size <= 1 else f'{window_size}条→1个窗口'}\n"
             f"每电压上限: {'不限' if max_samples <= 0 else f'{max_samples}条'}\n"
             "运行中，请稍候...\n"
@@ -288,12 +358,19 @@ class DetectionPage(BasePage):
                 self._project_dir, train_v, test_v,
                 window_size=window_size,
                 max_samples_per_voltage=max_samples,
+                device_id=device_id,
+                device_mapping=device_mapping,
+                ref_device_id=ref_device_id,
             )
 
             if "error" in result:
                 self.log_text.setPlainText(f"错误: {result['error']}")
+                self._last_result = None
+                self.backfill_btn.setEnabled(False)
                 return
 
+            self._last_result = result
+            self.backfill_btn.setEnabled(True)
             self._show_results(result)
         except Exception as e:
             import traceback
@@ -341,19 +418,25 @@ class DetectionPage(BasePage):
         log_lines = []
         ws = result.get("window_size", 1)
         ms = result.get("max_samples_per_voltage", 0)
-        if ws > 1 or ms > 0:
+        dm = result.get("device_mapping", False)
+        rd = result.get("ref_device_id", None)
+        if ws > 1 or ms > 0 or dm:
             parts = []
             if ws > 1:
                 parts.append(f"滑动窗口: {ws}条→1个窗口")
             if ms > 0:
                 parts.append(f"每电压上限: {ms}条")
+            if dm and rd:
+                parts.append(f"设备映射 → {rd}")
             parts.append(f"样本数: {metrics['train_count']}(训练) / {metrics['test_count']}(测试)")
             log_lines.append(" | ".join(parts))
             log_lines.append("")
 
         log_lines.append("── 各测试电压 MAE ──")
+        v_pred_mean = result.get("voltage_pred_mean", {})
         for v_label, v_mae in sorted(result.get("voltage_mae", {}).items(), key=lambda x: float(x[0].rstrip("V"))):
-            log_lines.append(f"  {v_label:>6s}: {v_mae:.3f} V")
+            mean_str = f"  预测均值={v_pred_mean.get(v_label, 0):.2f}V" if v_label in v_pred_mean else ""
+            log_lines.append(f"  {v_label:>6s}: MAE={v_mae:.3f}V{mean_str}")
 
         log_lines.append("")
         log_lines.append("── 回归系数 ──")
@@ -361,7 +444,12 @@ class DetectionPage(BasePage):
         for name, val in sorted(coeff.items()):
             log_lines.append(f"  {name}: {val:.4f}")
 
-        # 归一化参数
+        # ── 弹出小提琴图 ─────────────────────────────────────
+        test_results = result.get("test_results", [])
+        train_results = result.get("train_results", [])
+        if test_results or train_results:
+            self._show_violin_popup(train_results, test_results)
+
         norm_params = result.get("norm_params", {})
         if norm_params:
             log_lines.append("")
@@ -371,3 +459,92 @@ class DetectionPage(BasePage):
                 log_lines.append(f"  {name}: {p['mean']:.4f} ± {p['std']:.4f}")
 
         self.log_text.setPlainText("\n".join(log_lines))
+
+    def _backfill_predicted(self):
+        """将预测结果回填到数据库的指定缓冲区。"""
+        if self._last_result is None:
+            return
+        train_results = self._last_result.get("train_results", [])
+        test_results = self._last_result.get("test_results", [])
+        all_results = train_results + test_results
+        if not all_results:
+            QMessageBox.information(self, "提示", "没有可回填的预测结果")
+            return
+        buffer = self.buffer_combo.currentData()
+        try:
+            self.dm.backfill_predicted(all_results, buffer_index=buffer)
+            n = len(all_results)
+            self.log_text.appendPlainText(f"\n✓ 已回填 {n} 条记录到缓冲区 {buffer}")
+            self.log_text.appendPlainText("可在「数据探索」页查看")
+        except Exception as e:
+            QMessageBox.critical(self, "回填失败", str(e))
+
+    def _show_violin_popup(self, train_results: list[dict], test_results: list[dict]):
+        """弹出独立窗口显示小提琴图（含训练集 + 测试集，含真值/均值线）。"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("各电压的预测分布 (小提琴图)")
+        dialog.resize(1000, 600)
+
+        layout = QVBoxLayout(dialog)
+
+        fig = Figure(figsize=(10, 5.5))
+        fig.set_tight_layout(True)
+        ax = fig.add_subplot(111)
+
+        # ── 合并训练+测试数据，用 hue 区分 ──
+        plot_data = []
+        for tr in train_results:
+            plot_data.append({"电压": f"{tr['actual']:.0f}V", "预测值(V)": tr["pred"], "数据集": "训练"})
+        for tr in test_results:
+            plot_data.append({"电压": f"{tr['actual']:.0f}V", "预测值(V)": tr["pred"], "数据集": "测试"})
+        if not plot_data:
+            dialog.accept()
+            return
+
+        vf = pd.DataFrame(plot_data)
+        cats = sorted(vf["电压"].unique(), key=lambda x: float(x.rstrip("V")))
+        vf["电压"] = pd.Categorical(vf["电压"], categories=cats, ordered=True)
+        sns.violinplot(data=vf, x="电压", y="预测值(V)", hue="数据集", ax=ax,
+                       palette={"训练": "#A0D8F1", "测试": "#F4A582"},
+                       split=False, density_norm="width")
+
+        # ── 画真值线和均值线 ──
+        for i, cat in enumerate(cats):
+            v = float(cat.rstrip("V"))
+
+            # 真值线（灰色虚线）
+            ax.hlines(v, i - 0.4, i + 0.4, colors="gray", linestyles="--",
+                      linewidth=1.5, label="真值" if i == 0 else "")
+
+            # 测试集预测均值
+            test_sub = [tr["pred"] for tr in test_results if abs(tr["actual"] - v) < 1e-6]
+            if test_sub:
+                mean_test = np.mean(test_sub)
+                ax.hlines(mean_test, i - 0.4, i + 0.4, colors="#D62728", linestyles="-",
+                          linewidth=2, label="测试均值" if i == 0 else "")
+
+            # 训练集预测均值
+            train_sub = [tr["pred"] for tr in train_results if abs(tr["actual"] - v) < 1e-6]
+            if train_sub:
+                mean_train = np.mean(train_sub)
+                ax.hlines(mean_train, i - 0.4, i + 0.4, colors="#1F77B4", linestyles="-",
+                          linewidth=2, label="训练均值" if i == 0 else "")
+
+        handles, labels = ax.get_legend_handles_labels()
+        # 去重合并
+        unique = dict(zip(labels, handles))
+        ax.legend(unique.values(), unique.keys(), fontsize=9)
+
+        ax.set_title("各电压预测值分布 (小提琴图)")
+        ax.set_ylabel("预测电压 (V)")
+
+        canvas = FigureCanvasQTAgg(fig)
+        layout.addWidget(canvas)
+
+        toolbar = NavigationToolbar2QT(canvas, dialog)
+        layout.addWidget(toolbar)
+
+        dialog.exec()

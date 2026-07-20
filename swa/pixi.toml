@@ -26,6 +26,7 @@ tqdm = ">=4.66.0"
 scikit-learn = ">=1.7.0"
 PySide6 = ">=6.8.0"
 pyecharts = ">=2.0.0"
+seaborn = ">=0.13.0"
 
 [target.win-64.pypi-dependencies]
 dmpython = ">=2.5.32"
