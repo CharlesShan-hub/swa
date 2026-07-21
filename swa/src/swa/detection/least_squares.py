@@ -136,6 +136,34 @@ def _compute_a1_mapping(
     return mapper
 
 
+def _humidity_correct_a1(df: pd.DataFrame) -> pd.DataFrame:
+    """对 A1 进行湿度校正，消除湿度对 A1 的偏移影响。
+
+    对每个设备拟合 A1 = α·|V| + γ·H + β，
+    校正: A1_corrected = A1 - γ·(H - 40)，
+    使 A1 归一化到湿度 40% 的基线水平。
+
+    Returns:
+        校正后的 DataFrame（harm_a1 列已更新）
+    """
+    df = df.copy()
+    for dev in df["device_id"].dropna().unique():
+        mask = df["device_id"] == dev
+        sub = df[mask]
+        if len(sub) < 10:
+            continue
+        X = np.column_stack([
+            sub["actual_voltage"].abs().values,
+            sub["humidity"].values,
+        ])
+        y = sub["harm_a1"].values
+        X_aug = np.column_stack([np.ones(len(X)), X])
+        coeffs, *_ = np.linalg.lstsq(X_aug, y, rcond=None)
+        gamma = coeffs[2]  # 湿度系数
+        df.loc[mask, "harm_a1"] = y - gamma * (sub["humidity"].values - 40.0)
+    return df
+
+
 def _apply_window(df: pd.DataFrame, window_size: int) -> pd.DataFrame:
     """对每个电压等级内的记录做滑动窗口平均。
 
@@ -185,6 +213,7 @@ def _load_data(
     device_id: Optional[str] = None,
     device_mapping: bool = False,
     ref_device_id: Optional[str] = None,
+    humidity_correction: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """加载训练集和测试集的波形数据。
 
@@ -267,6 +296,10 @@ def _load_data(
         records.append(feats)
 
     df = pd.DataFrame(records)
+
+    # A1 湿度校正（在设备映射之前）
+    if humidity_correction:
+        df = _humidity_correct_a1(df)
 
     # 设备映射校准（A1 + 温湿度）
     if device_mapping and ref_device_id and not device_id:
@@ -357,6 +390,7 @@ def run(
     device_id: Optional[str] = None,
     device_mapping: bool = False,
     ref_device_id: Optional[str] = None,
+    humidity_correction: bool = False,
 ) -> dict:
     """运行最小二乘法检测。
 
@@ -369,6 +403,7 @@ def run(
         device_id: 按设备 ID 过滤（None=全部设备）
         device_mapping: 是否启用设备映射校准
         ref_device_id: 基准设备 ID（映射目标）
+        humidity_correction: 是否对 A1 进行湿度校正
 
     Returns:
         dict: {
@@ -395,6 +430,7 @@ def run(
         device_id=device_id,
         device_mapping=device_mapping,
         ref_device_id=ref_device_id,
+        humidity_correction=humidity_correction,
     )
 
     if len(train_df) < 5:
@@ -488,4 +524,5 @@ def run(
         "norm_params": norm_params,
         "device_mapping": device_mapping,
         "ref_device_id": ref_device_id,
+        "humidity_correction": humidity_correction,
     }

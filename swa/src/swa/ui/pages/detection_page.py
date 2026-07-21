@@ -2,7 +2,7 @@
 检测页面 — 选择项目/检测方法/电压分配，运行检测并查看结果。
 """
 
-import sys, os
+import sys, os, json
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 
@@ -179,6 +179,16 @@ class DetectionPage(BasePage):
 
         param_row.addSpacing(12)
 
+        param_row.addWidget(QLabel("湿度校正:"))
+        self.hum_corr_combo = QComboBox()
+        self.hum_corr_combo.addItems(["禁用", "启用"])
+        self.hum_corr_combo.setCurrentIndex(0)
+        self.hum_corr_combo.setFixedWidth(80)
+        self.hum_corr_combo.setToolTip("启用后对 A1 进行湿度漂移校正（实验性）")
+        param_row.addWidget(self.hum_corr_combo)
+
+        param_row.addSpacing(12)
+
         param_row.addWidget(QLabel("回填到:"))
         self.buffer_combo = QComboBox()
         for i in range(1, 6):
@@ -285,6 +295,9 @@ class DetectionPage(BasePage):
                 cnt = self._voltage_counts.get(v, 0)
                 self.train_list.addItem(f"{v:+.0f} V ({cnt}条)")
 
+            # 恢复上次的电压分配（若保存过）
+            self._load_voltage_config()
+
             self.log_text.setPlainText(
                 f"已加载项目: {name}\n"
                 f"总记录: {meta['total_records']}, 启用: {meta['enabled_records']}\n"
@@ -304,6 +317,49 @@ class DetectionPage(BasePage):
         for item in items:
             dst.addItem(item.text())
             src.takeItem(src.row(item))
+        self._save_voltage_config()
+
+    # ── 电压分配持久化 ──────────────────────────────────────────
+
+    def _save_voltage_config(self):
+        """将当前电压 train/test/discard 分配保存到项目目录。"""
+        if not self._project_dir:
+            return
+        config = {
+            "train": [self.train_list.item(i).text() for i in range(self.train_list.count())],
+            "test": [self.test_list.item(i).text() for i in range(self.test_list.count())],
+            "discard": [self.discard_list.item(i).text() for i in range(self.discard_list.count())],
+        }
+        path = os.path.join(self._project_dir, "voltage_config.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # 静默失败，不影响主流程
+
+    def _load_voltage_config(self):
+        """从项目目录恢复电压 train/test/discard 分配。"""
+        if not self._project_dir:
+            return
+        path = os.path.join(self._project_dir, "voltage_config.json")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception:
+            return
+
+        self.train_list.clear()
+        self.test_list.clear()
+        self.discard_list.clear()
+
+        for text in config.get("train", []):
+            self.train_list.addItem(text)
+        for text in config.get("test", []):
+            self.test_list.addItem(text)
+        for text in config.get("discard", []):
+            self.discard_list.addItem(text)
 
     # ── 运行检测 ────────────────────────────────────────────────
 
@@ -361,6 +417,7 @@ class DetectionPage(BasePage):
                 device_id=device_id,
                 device_mapping=device_mapping,
                 ref_device_id=ref_device_id,
+                humidity_correction=self.hum_corr_combo.currentIndex() == 1,
             )
 
             if "error" in result:
