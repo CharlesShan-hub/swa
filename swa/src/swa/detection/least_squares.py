@@ -4,12 +4,11 @@
 利用最小二乘周期投影提取波形特征，归一化后用线性回归拟合电压绝对值。
 
 特征（原始 → 归一化）:
-  - alpha_7:      7.0 周期余弦分量幅值（对湿度和 RPM 不敏感）
-  - score:        7.0 + 8.1 周期加权评分
-  - harm_a1:      FFT 基波幅值
-  - temperature:  环境温度（z-score 归一化）
-  - humidity:     环境湿度（z-score 归一化）
-  - rpm:          转子转速（z-score 归一化）
+  - alpha_7:        7.0 周期余弦分量幅值（已移除）
+  - score:          7.0 + 8.1 周期加权评分
+  - harm_a1:        FFT 基波幅值
+  - temperature:    环境温度（z-score 归一化）
+  - humidity:       环境湿度（z-score 归一化）
 
 归一化:
   在训练集上计算各特征的均值/标准差，同步应用到测试集，
@@ -52,7 +51,7 @@ def _extract_features(wave: np.ndarray) -> dict[str, float]:
     score = compute_score(wave)
     features["score"] = score
 
-    # FFT 特征（仅 harm_a1）
+    # FFT 特征（harm_a1, harm_a2 及比例）
     y = wave - np.mean(wave)
     n = len(y)
     if n >= 20:
@@ -63,15 +62,31 @@ def _extract_features(wave: np.ndarray) -> dict[str, float]:
             fund_idx = int(np.argmax(mag[:search_end]) + 1)
             a1 = float(mag[fund_idx - 1])
             features["harm_a1"] = a1 if a1 > 0 else 0.0
+            # A2: 第二谐波（基波的2倍频位置）
+            a2_idx = fund_idx * 2 - 1
+            if a2_idx < len(mag):
+                a2 = float(mag[a2_idx])
+                features["harm_a2"] = a2 if a2 > 0 else 0.0
+            else:
+                features["harm_a2"] = 0.0
+            # A2/A1 谐波比例
+            if features["harm_a1"] > 0 and features["harm_a2"] > 0:
+                features["harm_a2_div_a1"] = features["harm_a2"] / features["harm_a1"]
+            else:
+                features["harm_a2_div_a1"] = 0.0
         else:
             features["harm_a1"] = 0.0
+            features["harm_a2"] = 0.0
+            features["harm_a2_div_a1"] = 0.0
     else:
         features["harm_a1"] = 0.0
+        features["harm_a2"] = 0.0
+        features["harm_a2_div_a1"] = 0.0
 
     return features
 
 
-_FEATURE_NAMES = ["alpha_7", "score", "harm_a1", "temperature", "humidity", "rpm"]
+_FEATURE_NAMES = ["score", "harm_a1", "temperature", "humidity"]
 
 
 def _compute_a1_mapping(
@@ -139,8 +154,9 @@ def _compute_a1_mapping(
 def _humidity_correct_a1(df: pd.DataFrame) -> pd.DataFrame:
     """对 A1 进行湿度校正，消除湿度对 A1 的偏移影响。
 
-    对每个设备拟合 A1 = α·|V| + γ·H + β，
-    校正: A1_corrected = A1 - γ·(H - 40)，
+    改进公式：湿度对 A1 的偏移量与电压大小成正比。
+    对每个设备拟合 A1 = β + α·|V| + k·|V|·(H-40) + γ·(H-40)，
+    校正: A1_corrected = A1 - (k·|V| + γ)·(H - 40)，
     使 A1 归一化到湿度 40% 的基线水平。
 
     Returns:
@@ -152,30 +168,37 @@ def _humidity_correct_a1(df: pd.DataFrame) -> pd.DataFrame:
         sub = df[mask]
         if len(sub) < 10:
             continue
-        X = np.column_stack([
-            sub["actual_voltage"].abs().values,
-            sub["humidity"].values,
-        ])
+
+        V = sub["actual_voltage"].abs().values
+        Hp = sub["humidity"].values - 40.0  # H' = H - 40
         y = sub["harm_a1"].values
-        X_aug = np.column_stack([np.ones(len(X)), X])
-        coeffs, *_ = np.linalg.lstsq(X_aug, y, rcond=None)
-        gamma = coeffs[2]  # 湿度系数
-        df.loc[mask, "harm_a1"] = y - gamma * (sub["humidity"].values - 40.0)
+
+        # 设计矩阵: [1, V, V·H', H']
+        X = np.column_stack([np.ones(len(V)), V, V * Hp, Hp])
+        coeffs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        k = coeffs[2]   # V×H' 交互系数
+        gamma = coeffs[3]  # H' 系数
+
+        # 校正: A1_corrected = A1 - (k·V + γ)·H'
+        df.loc[mask, "harm_a1"] = y - (k * V + gamma) * Hp
     return df
 
 
-def _apply_window(df: pd.DataFrame, window_size: int) -> pd.DataFrame:
+def _apply_window(df: pd.DataFrame, window_size: int, method: str = "mean") -> pd.DataFrame:
     """对每个电压等级内的记录做滑动窗口平均。
 
     Args:
         df: 包含 actual_voltage 和各特征的 DataFrame，按 id 排序
         window_size: 窗口大小（1 = 不做平均）
+        method: "mean" = 均值, "median" = 中位数
 
     Returns:
         窗口平均后的 DataFrame
     """
     if window_size <= 1:
         return df
+
+    agg_func = {"mean": "mean", "median": "median"}.get(method, "mean")
 
     windows = []
     # 按电压分组（已是连续排列）
@@ -186,7 +209,8 @@ def _apply_window(df: pd.DataFrame, window_size: int) -> pd.DataFrame:
             # 记录太少，整个电压作为一个窗口
             row = {"actual_voltage": voltage}
             for feat in _FEATURE_NAMES:
-                row[feat] = float(group[feat].mean())
+                row[feat] = float(getattr(group[feat], agg_func)())
+            row["device_id"] = group["device_id"].iloc[0]
             row["window_ids"] = list(group["id"])
             row["window_count"] = n
             windows.append(row)
@@ -196,7 +220,8 @@ def _apply_window(df: pd.DataFrame, window_size: int) -> pd.DataFrame:
             seg = group.iloc[start : start + window_size]
             row = {"actual_voltage": voltage}
             for feat in _FEATURE_NAMES:
-                row[feat] = float(seg[feat].mean())
+                row[feat] = float(getattr(seg[feat], agg_func)())
+            row["device_id"] = seg["device_id"].iloc[0]
             row["window_ids"] = list(seg["id"])
             row["window_count"] = window_size
             windows.append(row)
@@ -209,11 +234,15 @@ def _load_data(
     train_voltages: list[float],
     test_voltages: list[float],
     window_size: int = 1,
+    window_method: str = "mean",
     max_samples_per_voltage: int = 0,
     device_id: Optional[str] = None,
     device_mapping: bool = False,
     ref_device_id: Optional[str] = None,
     humidity_correction: bool = False,
+    max_noise_pct: float = 1.0,
+    noise_correction: bool = False,
+    clip_correction: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """加载训练集和测试集的波形数据。
 
@@ -222,10 +251,15 @@ def _load_data(
         train_voltages: 训练电压列表
         test_voltages: 测试电压列表
         window_size: 滑动窗口大小（默认 1 = 不做平均）
+        window_method: 窗口聚合方式 ("mean" 或 "median")
         max_samples_per_voltage: 每电压最大样本数（<=0 不限）
         device_id: 按设备 ID 过滤（None=全部设备）
         device_mapping: 是否启用设备映射校准
         ref_device_id: 基准设备 ID（映射目标）
+        humidity_correction: 是否对 A1 进行湿度校正
+        max_noise_pct: 最大噪声百分比阈值（>此值的记录会被过滤，默认1.0=不过滤）
+        noise_correction: 是否对 A1 进行噪声校正（A1_clean = A1 × (1-noise_pct)）
+        clip_correction: 削波矫正（False=禁用, True=全部设备, list[str]=仅指定设备）
 
     Returns:
         (train_df, test_df), 每列包含 actual_voltage 和各特征
@@ -266,7 +300,8 @@ def _load_data(
     # 获取全部数据（按 id 排序以确保时间顺序）
     rows = conn.execute(f"""
         SELECT r.id, r.actual_voltage, r.temperature, r.humidity, r.rpm,
-               r.device_id, w.wave_data
+               r.device_id, r.harm_noise_pct,
+               r.harm_a1, r.harm_a1_corrected, w.wave_data
         FROM records r
         JOIN waveforms w ON w.record_id = r.id
         WHERE {where_sql}
@@ -278,7 +313,12 @@ def _load_data(
     # 提取特征
     records = []
     for row in rows:
-        rid, voltage, temp, humid, rpm_val, dev_id, wave_str = row
+        rid, voltage, temp, humid, rpm_val, dev_id, noise_pct, \
+            db_harm_a1, db_harm_a1_corrected, wave_str = row
+
+        # 噪声过滤
+        if noise_pct is not None and noise_pct > max_noise_pct:
+            continue
         try:
             wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
         except (ValueError, TypeError, AttributeError):
@@ -293,9 +333,34 @@ def _load_data(
         feats["humidity"] = float(humid) if humid is not None else 0.0
         feats["rpm"] = float(rpm_val) if rpm_val is not None else 0.0
         feats["device_id"] = str(dev_id) if dev_id is not None else None
+        feats["harm_noise_pct"] = float(noise_pct) if noise_pct is not None else 0.0
+        # 保存在数据库中的原始/矫正 A1（用于削波矫正）
+        feats["harm_a1_corrected"] = float(db_harm_a1_corrected) if db_harm_a1_corrected is not None else None
         records.append(feats)
 
     df = pd.DataFrame(records)
+
+    # 削波矫正：用数据库中的 harm_a1_corrected 替换 harm_a1
+    # clip_correction 支持: False/[]=禁用, True=全部设备, list[str]=仅指定设备
+    if clip_correction:
+        clip_devices = clip_correction if isinstance(clip_correction, list) else None
+        for idx, row in df.iterrows():
+            if clip_devices is not None:
+                dev_id = str(row.get("device_id", ""))
+                if dev_id not in clip_devices:
+                    continue
+            corrected = row.get("harm_a1_corrected")
+            if corrected is not None and corrected > 0 and corrected != row["harm_a1"]:
+                df.at[idx, "harm_a1"] = corrected
+
+    # A1 噪声校正（在湿度校正和映射之前）
+    if noise_correction:
+        # 噪声越大，A1 中的噪声成分越多，扣除后得到干净的 A1
+        for idx, row in df.iterrows():
+            a1_raw = row["harm_a1"]
+            npct = row.get("harm_noise_pct", 0.0)
+            if npct is not None and npct > 0 and a1_raw > 0:
+                df.at[idx, "harm_a1"] = a1_raw * (1.0 - npct)
 
     # A1 湿度校正（在设备映射之前）
     if humidity_correction:
@@ -328,7 +393,7 @@ def _load_data(
 
     # 滑动窗口平均
     if window_size > 1:
-        df = _apply_window(df, window_size)
+        df = _apply_window(df, window_size, method=window_method)
 
     # 每电压最大样本数限制
     df = _limit_per_voltage(df, max_samples_per_voltage)
@@ -386,11 +451,15 @@ def run(
     train_voltages: list[float],
     test_voltages: list[float],
     window_size: int = 1,
+    window_method: str = "mean",
     max_samples_per_voltage: int = 0,
     device_id: Optional[str] = None,
     device_mapping: bool = False,
     ref_device_id: Optional[str] = None,
     humidity_correction: bool = False,
+    max_noise_pct: float = 1.0,
+    noise_correction: bool = False,
+    clip_correction: bool = False,
 ) -> dict:
     """运行最小二乘法检测。
 
@@ -404,6 +473,9 @@ def run(
         device_mapping: 是否启用设备映射校准
         ref_device_id: 基准设备 ID（映射目标）
         humidity_correction: 是否对 A1 进行湿度校正
+        max_noise_pct: 最大噪声百分比阈值（>此值的记录被过滤，默认1.0=不过滤）
+        noise_correction: 是否对 A1 进行噪声校正（A1_clean = A1 × (1-noise_pct)）
+        clip_correction: 削波矫正（False=禁用, True=全部设备, list[str]=仅指定设备）
 
     Returns:
         dict: {
@@ -426,11 +498,15 @@ def run(
     train_df, test_df = _load_data(
         project_dir, train_voltages, test_voltages,
         window_size=window_size,
+        window_method=window_method,
         max_samples_per_voltage=max_samples_per_voltage,
         device_id=device_id,
         device_mapping=device_mapping,
         ref_device_id=ref_device_id,
         humidity_correction=humidity_correction,
+        max_noise_pct=max_noise_pct,
+        noise_correction=noise_correction,
+        clip_correction=clip_correction,
     )
 
     if len(train_df) < 5:
@@ -493,6 +569,7 @@ def run(
             "ids": row["window_ids"] if use_window else [int(row["id"])],
             "actual": abs(float(row["actual_voltage"])),
             "pred": float(pred),
+            "device_id": row.get("device_id"),
         }
         for row, pred in zip(train_df.to_dict("records"), train_pred)
     ]
@@ -502,6 +579,7 @@ def run(
             "ids": row["window_ids"] if use_window else [int(row["id"])],
             "actual": abs(float(row["actual_voltage"])),
             "pred": float(pred),
+            "device_id": row.get("device_id"),
         }
         for row, pred in zip(test_df.to_dict("records"), test_pred)
     ]

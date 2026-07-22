@@ -171,6 +171,24 @@ class DataManager:
             except Exception:
                 pass  # 列已存在
 
+        # 迁移：添加 harm_clip_ratio 列（已有项目）
+        try:
+            self._conn.execute("ALTER TABLE records ADD COLUMN harm_clip_ratio REAL")
+        except Exception:
+            pass  # 列已存在
+
+        # 迁移：添加 harm_clip_corrected 列（已有项目）
+        try:
+            self._conn.execute("ALTER TABLE records ADD COLUMN harm_clip_corrected INTEGER DEFAULT 0")
+        except Exception:
+            pass  # 列已存在
+
+        # 迁移：添加 harm_a1_corrected 列（已有项目）
+        try:
+            self._conn.execute("ALTER TABLE records ADD COLUMN harm_a1_corrected REAL")
+        except Exception:
+            pass  # 列已存在
+
         # 更新 meta 中的统计
         meta = self._load_meta()
         meta["total_records"] = self._count("1=1")
@@ -230,7 +248,6 @@ class DataManager:
         row = cur.fetchone()
         if row is None:
             return None
-        # SQLite 存的是逗号分隔的文本
         try:
             return np.array([float(x) for x in row[0].split(",")])
         except (ValueError, TypeError):
@@ -279,10 +296,9 @@ class DataManager:
         判断依据（使用导入时已算好的字段）:
             - harm_a1 IS NULL → 坏数据（无有效波形）
             - harm_cycles NOT BETWEEN 6.5 AND 7.5 → 周期数不对
-            - harm_thd > 0.30 → 总谐波失真过大（方波、削波等）
-            - harm_noise_pct > 0.30 → 超过30%能量不在基频（噪声较大）
+            - harm_noise_pct > 0.20 → 超过20%能量不在基频（噪声较大）
             - harm_a2 / harm_a1 > 0.25 → 二次谐波过大
-            - harm_error / harm_a1 > 0.30 → 拟合误差过大
+            - harm_error / harm_a1 > 0.0008 → 拟合误差过大
 
         Returns:
             禁用条数
@@ -295,10 +311,9 @@ class DataManager:
                     OR harm_a1 < 1
                     OR harm_cycles < 6.5
                     OR harm_cycles > 7.5
-                    OR harm_thd > 0.30
-                    OR harm_noise_pct > 0.30
-                    OR (harm_a2 / harm_a1) > 0.25
-                    OR (harm_error / harm_a1) > 0.30
+                    OR harm_noise_pct > 0.20
+                    OR (harm_a2 / harm_a1) > 0.20
+                    OR (harm_error / harm_a1) > 0.0008
                 )
         """)
         n = cur.rowcount
@@ -322,10 +337,10 @@ class DataManager:
             if not rows:
                 break
             for row in rows:
-                a1, a2, err, cycles, thd, noise_pct = compute_harmonics(row["wave_data"])
+                a1_orig, a1_corrected, a2, err, cycles, thd, noise_pct, clip_ratio = compute_harmonics(row["wave_data"], clip_correction=True)
                 cur.execute(
-                    "UPDATE records SET harm_a1=?, harm_a2=?, harm_error=?, harm_cycles=?, harm_thd=?, harm_noise_pct=? WHERE id=?",
-                    (a1, a2, err, cycles, thd, noise_pct, row["id"]),
+                    "UPDATE records SET harm_a1=?, harm_a1_corrected=?, harm_a2=?, harm_error=?, harm_cycles=?, harm_noise_pct=?, harm_clip_ratio=?, harm_clip_corrected=? WHERE id=?",
+                    (a1_orig, a1_corrected, a2, err, cycles, noise_pct, clip_ratio, 1 if clip_ratio and clip_ratio > 0 else 0, row["id"]),
                 )
                 total += 1
             offset += batch_size
@@ -354,6 +369,68 @@ class DataManager:
                     (round(pred, 2), rid),
                 )
         self._conn.commit()
+
+    def apply_median_filter(self, window_size: int = 5, progress_callback=None) -> int:
+        """对当前项目所有波形应用中值滤波（扫两次），更新存储的波形数据。
+
+        这是一个一次性的批量预处理操作，在数据层面直接修改 waveforms 表中的波形，
+        后续检测流程不需要再重复计算。
+
+        Args:
+            window_size: 滤波窗口大小（3 或 5，推荐 5）
+            progress_callback: 可选进度回调函数 f(current, total)
+
+        Returns:
+            处理的记录数
+        """
+        from swa.data.loader import _median_filter
+
+        if self._conn is None:
+            raise RuntimeError("请先 load_project()")
+
+        cur = self._conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM waveforms")
+        total = cur.fetchone()[0]
+        if total == 0:
+            return 0
+
+        batch_size = 500
+        processed = 0
+        offset = 0
+
+        while offset < total:
+            cur.execute(
+                "SELECT record_id, wave_data FROM waveforms ORDER BY record_id LIMIT ? OFFSET ?",
+                (batch_size, offset),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                break
+
+            for rid, wave_str in rows:
+                try:
+                    wave = np.array([float(x) for x in wave_str.split(",")], dtype=np.float64)
+                    wave = _median_filter(wave, window_size)
+                    wave = _median_filter(wave, window_size)
+                    filtered_str = ",".join(f"{v}" for v in wave)
+                    cur.execute(
+                        "UPDATE waveforms SET wave_data = ? WHERE record_id = ?",
+                        (filtered_str, rid),
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+                processed += 1
+                if progress_callback and processed % 100 == 0:
+                    progress_callback(processed, total)
+
+            self._conn.commit()
+            offset += batch_size
+
+        if progress_callback:
+            progress_callback(processed, total)
+
+        return processed
 
     def quality_summary(self) -> dict:
         """质量统计。"""
@@ -440,8 +517,10 @@ class DataManager:
                 harm_a2         REAL,
                 harm_error      REAL,
                 harm_cycles     REAL,
-                harm_thd        REAL,
                 harm_noise_pct  REAL,
+                harm_clip_ratio REAL,
+                harm_clip_corrected INTEGER DEFAULT 0,
+                harm_a1_corrected REAL,
                 created_at      TEXT DEFAULT (datetime('now'))
             );
 
@@ -456,6 +535,25 @@ class DataManager:
             CREATE INDEX IF NOT EXISTS idx_records_voltage ON records(actual_voltage);
             CREATE INDEX IF NOT EXISTS idx_records_time ON records(system_time);
         """)
+
+    @staticmethod
+    def _check_harmonic_quality(a1_orig, a1_corrected, a2, err, cycles, noise_pct, clip_ratio=0.0) -> bool:
+        """基于谐波参数判断波形质量。
+
+        Returns:
+            True = 质量合格, False = 坏数据
+        """
+        if a1_orig is None or a1_orig < 1:
+            return False
+        if cycles is None or not (6.5 <= cycles <= 7.5):
+            return False
+        if noise_pct is None or noise_pct > 0.20:
+            return False
+        if a2 is None or a1_orig <= 0 or (a2 / a1_orig) > 0.20:
+            return False
+        if err is None or a1_orig <= 0 or (err / a1_orig) > 0.0008:
+            return False
+        return True
 
     def _import_dataframe(self, conn: sqlite3.Connection, df: pd.DataFrame):
         """将 DataFrame 导入 SQLite。"""
@@ -484,9 +582,9 @@ class DataManager:
             INSERT INTO records
                 (system_time, actual_voltage, temperature, humidity,
                  rpm, slave_id, device_id, test_case_code, enabled,
-                 harm_a1, harm_a2, harm_error,
-                 harm_cycles, harm_thd, harm_noise_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 harm_a1, harm_a1_corrected, harm_a2, harm_error,
+                 harm_cycles, harm_noise_pct, harm_clip_ratio, harm_clip_corrected)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         wave_sql = "INSERT INTO waveforms (record_id, wave_data) VALUES (?, ?)"
 
@@ -501,13 +599,21 @@ class DataManager:
             else:
                 vals.append(1)
 
-            # 计算谐波参数
+            # 计算谐波参数（启用削波矫正）
             wave_str = str(row.get(wave_col)) if wave_col and row.get(wave_col) else None
             if wave_str:
-                a1, a2, err, cycles, thd, noise_pct = compute_harmonics(wave_str)
-                vals.extend([a1, a2, err, cycles, thd, noise_pct])
+                a1_orig, a1_corrected, a2, err, cycles, thd, noise_pct, clip_ratio = compute_harmonics(wave_str, clip_correction=True)
+                # 质量检测：自动禁用坏数据（传入 clip_ratio 以便放宽削波记录的阈值）
+                is_good = self._check_harmonic_quality(a1_orig, a1_corrected, a2, err, cycles, noise_pct, clip_ratio)
+                # 如果 jsonl 中明确禁用，尊重原值；否则按质量检测结果
+                if pd.notna(raw_enabled) and int(raw_enabled) == 0:
+                    enabled_flag = 0
+                else:
+                    enabled_flag = 1 if is_good else 0
+                vals[-1] = enabled_flag  # 更新 enabled
+                vals.extend([a1_orig, a1_corrected, a2, err, cycles, noise_pct, clip_ratio, 1 if clip_ratio and clip_ratio > 0 else 0])
             else:
-                vals.extend([None, None, None, None, None, None])
+                vals.extend([None, None, None, None, None, None, None, 0])
 
             cur.execute(insert_sql, vals)
             record_id = cur.lastrowid

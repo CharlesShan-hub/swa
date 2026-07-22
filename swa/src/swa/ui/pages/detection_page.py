@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QListWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QSplitter, QAbstractItemView,
-    QMessageBox, QPlainTextEdit, QSpinBox,
+    QMessageBox, QPlainTextEdit, QSpinBox, QListWidgetItem,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -129,14 +129,14 @@ class DetectionPage(BasePage):
         param_row.addWidget(QLabel("滑动窗口大小:"))
         self.window_spin = QSpinBox()
         self.window_spin.setRange(1, 200)
-        self.window_spin.setValue(1)
+        self.window_spin.setValue(8)
         self.window_spin.setToolTip(
             ">1 时对同电压连续记录做滑动窗口平均，窗口内各条指标取平均作为一条样本"
         )
         self.window_spin.setFixedWidth(70)
         param_row.addWidget(self.window_spin)
         param_row.addSpacing(8)
-        self.window_info = QLabel("(1=不启用)")
+        self.window_info = QLabel("(8条→1个窗口)")
         param_row.addWidget(self.window_info)
         self.window_spin.valueChanged.connect(
             lambda v: self.window_info.setText(f"({v}条→1个窗口)" if v > 1 else "(1=不启用)")
@@ -166,6 +166,7 @@ class DetectionPage(BasePage):
 
         self.mapping_cb = QPushButton("映射校准")
         self.mapping_cb.setCheckable(True)
+        self.mapping_cb.setChecked(True)
         self.mapping_cb.setFixedHeight(24)
         self.mapping_cb.setToolTip("启用后，将非基准设备的 A1 通过电压映射校正到基准设备水平")
         self.mapping_cb.toggled.connect(self._on_mapping_toggled)
@@ -186,6 +187,24 @@ class DetectionPage(BasePage):
         self.hum_corr_combo.setFixedWidth(80)
         self.hum_corr_combo.setToolTip("启用后对 A1 进行湿度漂移校正（实验性）")
         param_row.addWidget(self.hum_corr_combo)
+
+        param_row.addSpacing(8)
+
+        param_row.addWidget(QLabel("噪声校正:"))
+        self.noise_corr_combo = QComboBox()
+        self.noise_corr_combo.addItems(["禁用", "启用"])
+        self.noise_corr_combo.setCurrentIndex(0)
+        self.noise_corr_combo.setFixedWidth(80)
+        self.noise_corr_combo.setToolTip("启用后对 A1 进行噪声校正: A1_clean = A1 × (1-noise_pct)")
+        param_row.addWidget(self.noise_corr_combo)
+
+        param_row.addSpacing(8)
+
+        param_row.addWidget(QLabel("削波:"))
+        self.clip_device_list = QListWidget()
+        self.clip_device_list.setMaximumHeight(56)
+        self.clip_device_list.setToolTip("勾选需要启用削波矫正的设备（仅选定的设备进行 A1 矫正）")
+        param_row.addWidget(self.clip_device_list)
 
         param_row.addSpacing(12)
 
@@ -281,6 +300,15 @@ class DetectionPage(BasePage):
             devices = [r[0] for r in cur.fetchall()]
             for did in devices:
                 self.device_combo.addItem(f"设备 {did}", did)
+
+            # 填充削波设备列表（多选，默认勾选 2539）
+            self.clip_device_list.clear()
+            for did in devices:
+                item = QListWidgetItem(f"设备 {did[-4:]}")
+                item.setData(Qt.UserRole, did)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if "2539" in did else Qt.Unchecked)
+                self.clip_device_list.addItem(item)
 
             # 填充基准设备下拉
             self.ref_device_combo.clear()
@@ -398,6 +426,15 @@ class DetectionPage(BasePage):
 
         device_str = f"全部设备" if device_id is None else f"设备 {device_id}"
         mapping_str = f"  映射到基准 {ref_device_id}" if device_mapping else ""
+
+        # 收集削波设备
+        clip_devices = []
+        for i in range(self.clip_device_list.count()):
+            item = self.clip_device_list.item(i)
+            if item.checkState() == Qt.Checked:
+                clip_devices.append(item.data(Qt.UserRole))
+        clip_str = ", ".join(d[-4:] for d in clip_devices) if clip_devices else "禁用"
+
         self.log_text.setPlainText(
             f"训练电压: {', '.join(f'{v:+.0f}V' for v in sorted(train_v))}\n"
             f"测试电压: {', '.join(f'{v:+.0f}V' for v in sorted(test_v)) if test_v else '(无)'}\n"
@@ -405,6 +442,8 @@ class DetectionPage(BasePage):
             f"设备: {device_str}{mapping_str}\n"
             f"滑动窗口: {'不启用' if window_size <= 1 else f'{window_size}条→1个窗口'}\n"
             f"每电压上限: {'不限' if max_samples <= 0 else f'{max_samples}条'}\n"
+            f"噪声校正: {'启用' if self.noise_corr_combo.currentIndex() == 1 else '禁用'}\n"
+            f"削波: {clip_str}\n"
             "运行中，请稍候...\n"
         )
         self.run_btn.setEnabled(False)
@@ -418,6 +457,8 @@ class DetectionPage(BasePage):
                 device_mapping=device_mapping,
                 ref_device_id=ref_device_id,
                 humidity_correction=self.hum_corr_combo.currentIndex() == 1,
+                noise_correction=self.noise_corr_combo.currentIndex() == 1,
+                clip_correction=clip_devices if clip_devices else False,
             )
 
             if "error" in result:
@@ -537,66 +578,84 @@ class DetectionPage(BasePage):
             QMessageBox.critical(self, "回填失败", str(e))
 
     def _show_violin_popup(self, train_results: list[dict], test_results: list[dict]):
-        """弹出独立窗口显示小提琴图（含训练集 + 测试集，含真值/均值线）。"""
+        """弹出独立窗口显示小提琴图 — N+1 个子图（每设备 + 总图）。"""
         from PySide6.QtWidgets import QDialog, QVBoxLayout
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+        from matplotlib.gridspec import GridSpec
+
+        all_results = train_results + test_results
+        if not all_results:
+            return
+
+        # 收集设备
+        dev_ids = set()
+        for r in all_results:
+            did = r.get("device_id")
+            if did:
+                dev_ids.add(did)
+        dev_ids = sorted(dev_ids)
+        n_dev = len(dev_ids)
+        n_plots = n_dev + 1  # 每个设备 + 总图
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("各电压的预测分布 (小提琴图)")
-        dialog.resize(1000, 600)
+        dialog.setWindowTitle("各电压预测分布 (小提琴图)")
+        dialog.resize(1200, 300 * n_plots)
 
         layout = QVBoxLayout(dialog)
 
-        fig = Figure(figsize=(10, 5.5))
-        fig.set_tight_layout(True)
-        ax = fig.add_subplot(111)
+        fig = Figure(figsize=(11, 3.5 * n_plots))
+        gs = GridSpec(n_plots, 1, figure=fig, hspace=0.4)
 
-        # ── 合并训练+测试数据，用 hue 区分 ──
-        plot_data = []
-        for tr in train_results:
-            plot_data.append({"电压": f"{tr['actual']:.0f}V", "预测值(V)": tr["pred"], "数据集": "训练"})
-        for tr in test_results:
-            plot_data.append({"电压": f"{tr['actual']:.0f}V", "预测值(V)": tr["pred"], "数据集": "测试"})
-        if not plot_data:
-            dialog.accept()
-            return
+        def _plot_violin(ax, tr, te, title):
+            """在指定 ax 上画小提琴图。"""
+            plot_data = []
+            for t in tr:
+                plot_data.append({"电压": f"{t['actual']:.0f}V", "预测值(V)": t["pred"], "数据集": "训练"})
+            for t in te:
+                plot_data.append({"电压": f"{t['actual']:.0f}V", "预测值(V)": t["pred"], "数据集": "测试"})
+            if not plot_data:
+                ax.text(0.5, 0.5, "无数据", ha="center", va="center", transform=ax.transAxes)
+                return
 
-        vf = pd.DataFrame(plot_data)
-        cats = sorted(vf["电压"].unique(), key=lambda x: float(x.rstrip("V")))
-        vf["电压"] = pd.Categorical(vf["电压"], categories=cats, ordered=True)
-        sns.violinplot(data=vf, x="电压", y="预测值(V)", hue="数据集", ax=ax,
-                       palette={"训练": "#A0D8F1", "测试": "#F4A582"},
-                       split=False, density_norm="width")
+            vf = pd.DataFrame(plot_data)
+            cats = sorted(vf["电压"].unique(), key=lambda x: float(x.rstrip("V")))
+            vf["电压"] = pd.Categorical(vf["电压"], categories=cats, ordered=True)
+            sns.violinplot(data=vf, x="电压", y="预测值(V)", hue="数据集", ax=ax,
+                           palette={"训练": "#A0D8F1", "测试": "#F4A582"},
+                           split=False, density_norm="width")
 
-        # ── 画真值线和均值线 ──
-        for i, cat in enumerate(cats):
-            v = float(cat.rstrip("V"))
+            # 真值线和均值线
+            for i, cat in enumerate(cats):
+                v = float(cat.rstrip("V"))
+                ax.hlines(v, i - 0.4, i + 0.4, colors="gray", linestyles="--",
+                          linewidth=1.5, label="真值" if i == 0 else "")
+                test_sub = [t["pred"] for t in te if abs(t["actual"] - v) < 1e-6]
+                if test_sub:
+                    ax.hlines(np.mean(test_sub), i - 0.4, i + 0.4,
+                              colors="#D62728", linewidth=2, label="测试均值" if i == 0 else "")
+                train_sub = [t["pred"] for t in tr if abs(t["actual"] - v) < 1e-6]
+                if train_sub:
+                    ax.hlines(np.mean(train_sub), i - 0.4, i + 0.4,
+                              colors="#1F77B4", linewidth=2, label="训练均值" if i == 0 else "")
 
-            # 真值线（灰色虚线）
-            ax.hlines(v, i - 0.4, i + 0.4, colors="gray", linestyles="--",
-                      linewidth=1.5, label="真值" if i == 0 else "")
+            handles, labels = ax.get_legend_handles_labels()
+            unique = dict(zip(labels, handles))
+            ax.legend(unique.values(), unique.keys(), fontsize=8)
+            ax.set_title(title)
+            ax.set_ylabel("预测电压 (V)")
+            ax.tick_params(axis="x", labelsize=8)
 
-            # 测试集预测均值
-            test_sub = [tr["pred"] for tr in test_results if abs(tr["actual"] - v) < 1e-6]
-            if test_sub:
-                mean_test = np.mean(test_sub)
-                ax.hlines(mean_test, i - 0.4, i + 0.4, colors="#D62728", linestyles="-",
-                          linewidth=2, label="测试均值" if i == 0 else "")
+        # ── 总图 ──
+        ax_total = fig.add_subplot(gs[0])
+        _plot_violin(ax_total, train_results, test_results, "所有设备 (汇总)")
 
-            # 训练集预测均值
-            train_sub = [tr["pred"] for tr in train_results if abs(tr["actual"] - v) < 1e-6]
-            if train_sub:
-                mean_train = np.mean(train_sub)
-                ax.hlines(mean_train, i - 0.4, i + 0.4, colors="#1F77B4", linestyles="-",
-                          linewidth=2, label="训练均值" if i == 0 else "")
-
-        handles, labels = ax.get_legend_handles_labels()
-        # 去重合并
-        unique = dict(zip(labels, handles))
-        ax.legend(unique.values(), unique.keys(), fontsize=9)
-
-        ax.set_title("各电压预测值分布 (小提琴图)")
-        ax.set_ylabel("预测电压 (V)")
+        # ── 各设备图 ──
+        for idx, dev in enumerate(dev_ids):
+            short_dev = dev[-4:]
+            ax = fig.add_subplot(gs[idx + 1])
+            tr_dev = [r for r in train_results if r.get("device_id") == dev]
+            te_dev = [r for r in test_results if r.get("device_id") == dev]
+            _plot_violin(ax, tr_dev, te_dev, f"设备 {short_dev} ({len(tr_dev)+len(te_dev)} 条)")
 
         canvas = FigureCanvasQTAgg(fig)
         layout.addWidget(canvas)

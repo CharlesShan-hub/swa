@@ -1,0 +1,19 @@
+# 本地配置文件（含数据库密码）
+data/config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pixi/
+pixi.lock
+
+# IDE
+.vscode/
+.idea/
+
+# 本地数据
+data/*.db
+data/*.db-wal
+data/*.db-shm

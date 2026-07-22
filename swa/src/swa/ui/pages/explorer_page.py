@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QAbstractItemView, QSpinBox, QLineEdit,
-    QCheckBox,
+    QCheckBox, QProgressDialog, QInputDialog, QMessageBox,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QShortcut, QKeySequence
@@ -90,6 +90,9 @@ class ExplorerPage(BasePage):
         self.backfill_btn = QPushButton("回填谐波")
         self.backfill_btn.clicked.connect(self._backfill_harmonics)
         wave_ctrl.addWidget(self.backfill_btn)
+        self.median_btn = QPushButton("中值滤波")
+        self.median_btn.clicked.connect(self._apply_median_filter)
+        wave_ctrl.addWidget(self.median_btn)
         wave_layout.addLayout(wave_ctrl)
 
         # 内嵌 matplotlib 画布
@@ -342,10 +345,11 @@ class ExplorerPage(BasePage):
         except Exception:
             pass
 
-        # 查记录信息
+        # 查记录信息（含矫正 A1）
         df = self.dm.query(
             fields=["id", "system_time", "actual_voltage", "temperature", "humidity",
-                    "harm_a1", "harm_a2", "harm_error"],
+                    "harm_a1", "harm_a1_corrected", "harm_a2", "harm_error",
+                    "harm_clip_ratio", "harm_clip_corrected"],
             where=f"id={record_id}", enabled_only=False,
         )
 
@@ -353,7 +357,27 @@ class ExplorerPage(BasePage):
         self.ax.plot(wave, linewidth=0.8, color="#333", label="原始")
         if fitted is not None:
             self.ax.plot(fitted + np.mean(wave), linewidth=1.2, color="#e74c3c",
-                         linestyle="--", label="拟合 (基频)")
+                         linestyle="--", label="拟合 (A1原始)")
+
+        # 如果有矫正 A1，画第二条拟合线
+        has_correction = False
+        if not df.empty and pd.notna(df.iloc[0].get("harm_a1_corrected")):
+            r = df.iloc[0]
+            a1_corrected = r["harm_a1_corrected"]
+            a1_orig = r["harm_a1"]
+            if pd.notna(a1_corrected) and a1_corrected != a1_orig:
+                has_correction = True
+                # 用矫正后的 A1 重建拟合波
+                n = len(wave)
+                wc_ = wave - np.mean(wave)
+                fft_vals_ = np.fft.rfft(wc_)
+                mag_ = np.abs(fft_vals_[1:])
+                fund_idx_ = int(np.argmax(mag_[: n // 6]) + 1)
+                phase_ = np.angle(fft_vals_[fund_idx_])
+                fitted_corrected = 2 * a1_corrected / n * np.cos(2 * np.pi * fund_idx_ * np.arange(n) / n + phase_)
+                self.ax.plot(fitted_corrected + np.mean(wave), linewidth=1.5, color="#2ecc71",
+                             linestyle="-", label="拟合 (A1矫正)")
+
         self.ax.set_xlabel("采样点")
         self.ax.set_ylabel("幅值")
         self.ax.grid(True, alpha=0.3)
@@ -363,12 +387,21 @@ class ExplorerPage(BasePage):
             r = df.iloc[0]
             title = f"ID={record_id}  电压={r['actual_voltage']}V"
             if pd.notna(r.get('harm_cycles')):
+                a1_val = r["harm_a1_corrected"] if pd.notna(r.get("harm_a1_corrected")) else r["harm_a1"]
+                a2_val = r["harm_a2"] if pd.notna(r["harm_a2"]) else 0
+                err_ratio = r['harm_error'] / a1_val if pd.notna(r['harm_error']) and pd.notna(a1_val) and a1_val > 1e-6 else None
                 title += (
                     f"  {r['harm_cycles']:.1f}周期"
-                    f"  A1={r['harm_a1']:.0f}  A2={r['harm_a2']:.0f}"
-                    f"  THD={r['harm_thd']:.2f}"
-                    f"  噪声={r['harm_noise_pct']:.0%}"
                 )
+                # A1 显示：原始值 + 矫正值（如有）
+                a1_orig = r["harm_a1"]
+                title += f"  A1原始={a1_orig:.0f}"
+                if has_correction:
+                    title += f" → 矫正={r['harm_a1_corrected']:.0f}"
+                title += f"  A2={a2_val:.0f}"
+                title += f"  噪声={r['harm_noise_pct']:.0%}"
+                if err_ratio is not None:
+                    title += f"  err/A1={err_ratio:.3f}"
             if pd.notna(r['system_time']):
                 title += f"  {r['system_time']}"
             self.ax.set_title(title)
@@ -395,8 +428,8 @@ class ExplorerPage(BasePage):
     def _get_data(self):
         df = self.dm.query(
             fields=["id", "system_time", "actual_voltage", "temperature", "humidity",
-                    "enabled", "harm_a1", "harm_a2", "harm_error",
-                    "harm_cycles", "harm_thd", "harm_noise_pct",
+                    "enabled", "harm_a1", "harm_a1_corrected", "harm_a2", "harm_error",
+                    "harm_cycles", "harm_noise_pct", "harm_clip_ratio", "harm_clip_corrected",
                     "predicted_voltage_1", "predicted_voltage_2", "predicted_voltage_3",
                     "predicted_voltage_4", "predicted_voltage_5"],
             where=self._build_where(),
@@ -490,6 +523,65 @@ class ExplorerPage(BasePage):
         finally:
             self.backfill_btn.setEnabled(True)
 
+    def _apply_median_filter(self):
+        """弹出窗口选择中值滤波窗口大小，批量处理所有波形。"""
+        if self.dm._conn is None:
+            return
+
+        window_size, ok = QInputDialog.getInt(
+            self, "中值滤波", "选择滤波窗口大小：",
+            min=3, max=5, step=2, value=5,
+        )
+        if not ok:
+            return
+
+        # 确认对话框
+        reply = QMessageBox.question(
+            self, "确认",
+            f"将对当前项目所有波形应用中值滤波（窗口={window_size}，扫两次），\n"
+            "此操作将直接修改数据库中存储的波形数据，不可撤销。\n\n是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        from PySide6.QtCore import QTimer
+        self.median_btn.setEnabled(False)
+        self.status_label.setText("中值滤波处理中...")
+
+        # 延迟启动，让 UI 先刷新
+        QTimer.singleShot(100, lambda: self._do_median_filter(window_size))
+
+    def _do_median_filter(self, window_size: int):
+        total = 0
+        try:
+            # 先获取总数
+            cur = self.dm._conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM waveforms")
+            total = cur.fetchone()[0]
+
+            if total == 0:
+                self.status_label.setText("没有波形数据")
+                self.median_btn.setEnabled(True)
+                return
+
+            progress = QProgressDialog(f"中值滤波处理中 (窗口={window_size})...", "", 0, total, self)
+            progress.setWindowTitle("中值滤波")
+            progress.setCancelButton(None)  # 不允许取消
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+
+            def on_progress(current, total):
+                progress.setValue(min(current, total))
+
+            n = self.dm.apply_median_filter(window_size, progress_callback=on_progress)
+            progress.setValue(total)
+            self.status_label.setText(f"中值滤波完成: {n} 条")
+        except Exception as e:
+            self.status_label.setText(f"中值滤波失败: {e}")
+        finally:
+            self.median_btn.setEnabled(True)
+
     # ── 表格 ────────────────────────────────────────────────────
 
     def _refresh_table(self):
@@ -507,9 +599,9 @@ class ExplorerPage(BasePage):
                 cols.append(f"predicted_voltage_{i + 1}")
                 headers.append(f"预测P{i + 1}")
         # 其余列
-        cols += ["temperature", "humidity", "harm_cycles", "harm_a1", "harm_a2", "harm_error",
-                 "harm_thd", "harm_noise_pct"]
-        headers += ["温度", "湿度", "周期", "A1", "A2", "误差", "THD", "噪声%"]
+        cols += ["temperature", "humidity", "harm_a1", "harm_a1_corrected",
+                 "harm_error", "harm_noise_pct"]
+        headers += ["温度", "湿度", "A1原始", "A1矫正", "误差/A1", "噪声%"]
 
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(headers)
@@ -517,12 +609,18 @@ class ExplorerPage(BasePage):
         for i, (_, row) in enumerate(df.iterrows()):
             for j, col in enumerate(cols):
                 val = row.get(col)
-                if col in ("harm_a1", "harm_a2", "harm_error", "harm_thd"):
-                    text = f"{val:.2f}" if pd.notna(val) else ""
+                if col == "harm_a1":
+                    text = f"{val:.4f}" if pd.notna(val) else ""
+                elif col == "harm_a1_corrected":
+                    text = f"{val:.4f}" if pd.notna(val) else ""
+                elif col == "harm_error":
+                    a1 = row.get("harm_a1")
+                    if pd.notna(val) and pd.notna(a1) and a1 > 1e-6:
+                        text = f"{val / a1:.4f}"
+                    else:
+                        text = ""
                 elif col == "harm_noise_pct":
                     text = f"{val:.1%}" if pd.notna(val) else ""
-                elif col == "harm_cycles":
-                    text = f"{val:.1f}" if pd.notna(val) else ""
                 elif col == "enabled":
                     text = str(int(val)) if pd.notna(val) else ""
                 elif col.startswith("predicted_voltage"):
