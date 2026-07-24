@@ -198,7 +198,9 @@ class ProjectManager:
         """
         project_dir = os.path.join(self.projects_dir, name)
         if os.path.exists(project_dir):
-            raise FileExistsError(f"项目 '{name}' 已存在")
+            # 清理同名残留目录（上次创建失败遗留的）
+            import shutil
+            shutil.rmtree(project_dir, ignore_errors=True)
         os.makedirs(project_dir)
 
         try:
